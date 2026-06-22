@@ -397,28 +397,96 @@ export default function App({ session }) {
     }));
   }
 
-  function addTrade(trade) {
-    setTradeOptions((prev) =>
-      prev.some((t) => t.toLowerCase() === trade.toLowerCase()) ? prev : [...prev, trade]
-    );
+  async function addTrade(trade) {
+    if (tradeOptions.some((t) => t.toLowerCase() === trade.toLowerCase())) return;
+  
+    const { error } = await supabase
+      .from("trades")
+      .insert({ user_id: session.user.id, name: trade });
+  
+    if (error) {
+      console.error("Error adding trade:", error);
+      return;
+    }
+  
+    setTradeOptions((prev) => [...prev, trade]);
+  }
+  
+  async function removeTrade(trade) {
+    const { error } = await supabase
+      .from("trades")
+      .delete()
+      .eq("user_id", session.user.id)
+      .eq("name", trade);
+  
+    if (error) {
+      console.error("Error removing trade:", error);
+      return;
+    }
+  
+    setTradeOptions((prev) => prev.filter((t) => t !== trade));
   }
 
   function removeTrade(trade) {
     setTradeOptions((prev) => prev.filter((t) => t !== trade));
   }
 
-  function addLibraryTask(item) {
-    const id = "tl" + Math.random().toString(36).slice(2, 9);
-    setTaskLibrary((prev) => [...prev, { id, ...item }]);
+  async function addLibraryTask(item) {
+    const { data, error } = await supabase
+      .from("task_library")
+      .insert({
+        user_id: session.user.id,
+        title: item.title,
+        category: item.category,
+        frequency_months: item.frequencyMonths,
+      })
+      .select()
+      .single();
+  
+    if (error) {
+      console.error("Error adding library task:", error);
+      return;
+    }
+  
+    setTaskLibrary((prev) => [...prev, {
+      id: data.id,
+      title: data.title,
+      category: data.category,
+      frequencyMonths: data.frequency_months,
+    }]);
   }
-
-  function updateLibraryTask(id, updates) {
+  
+  async function updateLibraryTask(id, updates) {
+    const { error } = await supabase
+      .from("task_library")
+      .update({
+        title: updates.title,
+        category: updates.category,
+        frequency_months: updates.frequencyMonths,
+      })
+      .eq("id", id);
+  
+    if (error) {
+      console.error("Error updating library task:", error);
+      return;
+    }
+  
     setTaskLibrary((prev) =>
       prev.map((item) => (item.id === id ? { ...item, ...updates } : item))
     );
   }
-
-  function removeLibraryTask(id) {
+  
+  async function removeLibraryTask(id) {
+    const { error } = await supabase
+      .from("task_library")
+      .delete()
+      .eq("id", id);
+  
+    if (error) {
+      console.error("Error removing library task:", error);
+      return;
+    }
+  
     setTaskLibrary((prev) => prev.filter((item) => item.id !== id));
   }
 
