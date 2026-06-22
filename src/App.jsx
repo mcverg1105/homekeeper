@@ -75,6 +75,64 @@ function sortWithOtherLast(items) {
   return [...rest, ...others];
 }
 
+const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const TASK_CATEGORIES = ["HVAC", "Exterior", "Safety", "Plumbing", "Appliances", "Other"];
+
+function trimRequired(value) {
+  return (value ?? "").trim();
+}
+
+function trimOptional(value) {
+  const trimmed = (value ?? "").trim();
+  return trimmed || null;
+}
+
+function isValidEmail(email) {
+  if (!email) return true;
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function isValidDateStr(dateStr) {
+  if (!dateStr) return false;
+  return /^\d{4}-\d{2}-\d{2}$/.test(dateStr) && !Number.isNaN(Date.parse(dateStr));
+}
+
+function isValidHexColor(color) {
+  return typeof color === "string" && /^#[0-9A-Fa-f]{6}$/.test(color);
+}
+
+function validateFrequencyMonths(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 1 && n <= 120 ? Math.round(n) : null;
+}
+
+function validateTaskCategory(category) {
+  return TASK_CATEGORIES.includes(category) ? category : null;
+}
+
+function validateRating(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(5, Math.max(0, Math.round(n)));
+}
+
+function readValidatedImageFile(file, onLoad) {
+  if (!file || !ALLOWED_IMAGE_TYPES.has(file.type)) {
+    console.error("Invalid image file type:", file?.type);
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    console.error("Image file too large (max 5 MB):", file.name);
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    onLoad({ src: reader.result, name: file.name });
+  };
+  reader.readAsDataURL(file);
+}
+
 const STATUS_STYLES = {
   overdue: { bg: "#FBEAF0", text: "#72243E", label: "Overdue", icon: AlertCircle },
   soon: { bg: "#FAEEDA", text: "#854F0B", label: "Due soon", icon: Clock },
@@ -139,26 +197,31 @@ export default function App({ session }) {
   
     async function loadData() {
       setLoadingData(true);
-  
-      const { data: homesData } = await supabase
-      .from("homes")
-      .select("*")
-      .order("name");
-  
-      const { data: contractorsData } = await supabase
+
+      const { data: homesData, error: homesError } = await supabase
+        .from("homes")
+        .select("*")
+        .order("name");
+
+      const { data: contractorsData, error: contractorsError } = await supabase
         .from("contractors")
         .select("*")
         .order("name");
-  
-      const { data: tradesData } = await supabase
+
+      const { data: tradesData, error: tradesError } = await supabase
         .from("trades")
         .select("*")
         .order("name");
-  
-      const { data: taskLibraryData } = await supabase
+
+      const { data: taskLibraryData, error: taskLibraryError } = await supabase
         .from("task_library")
         .select("*")
         .order("title");
+
+      if (homesError) console.error("Error loading homes:", homesError);
+      if (contractorsError) console.error("Error loading contractors:", contractorsError);
+      if (tradesError) console.error("Error loading trades:", tradesError);
+      if (taskLibraryError) console.error("Error loading task library:", taskLibraryError);
   
         if (homesData && homesData.length > 0) {
           setHomes(homesData.map((h) => ({ ...h, tasks: [], projects: [], warranties: [] })));
@@ -224,28 +287,85 @@ export default function App({ session }) {
     }));
   }
 
-  function addTask(newTask) {
-    const id = "t" + Math.random().toString(36).slice(2, 9);
+  async function addTask(newTask) {
+    const userId = session?.user?.id;
+    if (!userId || !activeHomeId) return;
+
+    const title = trimRequired(newTask.title);
+    if (!title) return;
+
+    const category = validateTaskCategory(newTask.category);
+    if (!category) return;
+
+    const frequencyMonths = validateFrequencyMonths(newTask.frequencyMonths);
+    if (frequencyMonths === null) return;
+
+    const contractorId = newTask.contractorId || null;
+    if (contractorId && !contractors.some((c) => c.id === contractorId)) return;
+
+    const nextDueValue = newTask.nextDue
+      ? (isValidDateStr(newTask.nextDue) ? newTask.nextDue : null)
+      : addMonths(TODAY.toISOString().split("T")[0], frequencyMonths);
+    if (!nextDueValue) return;
+
+    const { data, error } = await supabase
+      .from("tasks")
+      .insert({
+        home_id: activeHomeId,
+        user_id: userId,
+        title,
+        category,
+        frequency_months: frequencyMonths,
+        last_done: null,
+        next_due: nextDueValue,
+        contractor_id: contractorId,
+        images: Array.isArray(newTask.images) ? newTask.images : [],
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error adding task:", error);
+      return;
+    }
+
     updateHome(activeHomeId, (home) => ({
       ...home,
       tasks: [
         ...home.tasks,
         {
-          id,
-          title: newTask.title,
-          category: newTask.category,
-          frequencyMonths: newTask.frequencyMonths,
-          lastDone: null,
-          nextDue: newTask.nextDue || addMonths(TODAY.toISOString().split("T")[0], newTask.frequencyMonths),
-          contractorId: newTask.contractorId || null,
-          images: newTask.images || [],
+          id: data.id,
+          title: data.title,
+          category: data.category,
+          frequencyMonths: data.frequency_months,
+          lastDone: data.last_done,
+          nextDue: data.next_due,
+          contractorId: data.contractor_id,
+          notes: data.notes,
+          images: data.images || [],
+          completionNotes: data.completion_notes,
+          completionExpenses: data.completion_expenses || [],
         },
       ],
     }));
     setShowAddTask(false);
   }
 
-  function deleteTask(taskId) {
+  async function deleteTask(taskId) {
+    const userId = session?.user?.id;
+    if (!userId || !taskId) return;
+
+    const { error } = await supabase
+      .from("tasks")
+      .delete()
+      .eq("id", taskId)
+      .eq("user_id", userId);
+
+    if (error) {
+      console.error("Error deleting task:", error);
+      return;
+    }
+
     updateHome(activeHomeId, (home) => ({
       ...home,
       tasks: home.tasks.filter((t) => t.id !== taskId),
@@ -278,59 +398,80 @@ export default function App({ session }) {
   }
 
   async function addHome(newHome) {
+    const userId = session?.user?.id;
+    if (!userId) return;
+
+    const name = trimRequired(newHome.name);
+    if (!name) return;
+
+    const color = isValidHexColor(newHome.color) ? newHome.color : "#2F4A3E";
+
     const { data, error } = await supabase
       .from("homes")
       .insert({
-        user_id: session.user.id,
-        name: newHome.name,
-        address: newHome.address,
-        color: newHome.color,
-        image: newHome.image,
+        user_id: userId,
+        name,
+        address: trimOptional(newHome.address),
+        color,
+        image: newHome.image || null,
       })
       .select()
       .single();
-  
+
     if (error) {
       console.error("Error adding home:", error);
       return;
     }
-  
+
     setHomes((prev) => [...prev, { ...data, tasks: [], projects: [], warranties: [] }]);
     setActiveHomeId(data.id);
   }
 
   async function editHome(homeId, updates) {
+    const userId = session?.user?.id;
+    if (!userId || !homeId) return;
+
+    const name = trimRequired(updates.name);
+    if (!name) return;
+
+    const color = isValidHexColor(updates.color) ? updates.color : "#2F4A3E";
+
     const { error } = await supabase
       .from("homes")
       .update({
-        name: updates.name,
-        address: updates.address,
-        color: updates.color,
-        image: updates.image,
+        name,
+        address: trimOptional(updates.address),
+        color,
+        image: updates.image || null,
       })
-      .eq("id", homeId);
-  
+      .eq("id", homeId)
+      .eq("user_id", userId);
+
     if (error) {
       console.error("Error updating home:", error);
       return;
     }
-  
+
     setHomes((prev) =>
-      prev.map((h) => (h.id === homeId ? { ...h, ...updates } : h))
+      prev.map((h) => (h.id === homeId ? { ...h, name, address: trimOptional(updates.address), color, image: updates.image || null } : h))
     );
   }
 
   async function deleteHome(homeId) {
+    const userId = session?.user?.id;
+    if (!userId || !homeId) return;
+
     const { error } = await supabase
       .from("homes")
       .delete()
-      .eq("id", homeId);
-  
+      .eq("id", homeId)
+      .eq("user_id", userId);
+
     if (error) {
       console.error("Error deleting home:", error);
       return;
     }
-  
+
     const remaining = homes.filter((h) => h.id !== homeId);
     setHomes(remaining);
     if (activeHomeId === homeId) {
@@ -339,32 +480,48 @@ export default function App({ session }) {
   }
 
   async function addContractor(newContractor) {
+    const userId = session?.user?.id;
+    if (!userId) return;
+
+    const name = trimRequired(newContractor.name);
+    if (!name) return;
+
+    const email = trimOptional(newContractor.email);
+    if (email && !isValidEmail(email)) return;
+
+    const trade = trimRequired(newContractor.trade);
+    if (!trade) return;
+
+    const payload = {
+      user_id: userId,
+      name,
+      company: trimOptional(newContractor.company),
+      trade,
+      phone_mobile: trimOptional(newContractor.phoneMobile),
+      phone_office: trimOptional(newContractor.phoneOffice),
+      email,
+      license_number: trimOptional(newContractor.licenseNumber),
+      insurance_provider: trimOptional(newContractor.insuranceProvider),
+      insurance_policy_number: trimOptional(newContractor.insurancePolicyNumber),
+      insurance_expires: newContractor.insuranceExpires && isValidDateStr(newContractor.insuranceExpires)
+        ? newContractor.insuranceExpires
+        : null,
+      coi_image: newContractor.coiImage || null,
+      rating: validateRating(newContractor.rating),
+      notes: trimOptional(newContractor.notes),
+    };
+
     const { data, error } = await supabase
       .from("contractors")
-      .insert({
-        user_id: session.user.id,
-        name: newContractor.name,
-        company: newContractor.company,
-        trade: newContractor.trade,
-        phone_mobile: newContractor.phoneMobile,
-        phone_office: newContractor.phoneOffice,
-        email: newContractor.email,
-        license_number: newContractor.licenseNumber,
-        insurance_provider: newContractor.insuranceProvider,
-        insurance_policy_number: newContractor.insurancePolicyNumber,
-        insurance_expires: newContractor.insuranceExpires || null,
-        coi_image: newContractor.coiImage,
-        rating: newContractor.rating,
-        notes: newContractor.notes,
-      })
+      .insert(payload)
       .select()
       .single();
-  
+
     if (error) {
       console.error("Error adding contractor:", error);
       return;
     }
-  
+
     setContractors((prev) => [...prev, {
       id: data.id,
       name: data.name,
@@ -383,63 +540,84 @@ export default function App({ session }) {
     }]);
     setEditingContractor(null);
   }
-  
+
   async function editContractor(contractorId, updates) {
+    const userId = session?.user?.id;
+    if (!userId || !contractorId) return;
+
+    const name = trimRequired(updates.name);
+    if (!name) return;
+
+    const email = trimOptional(updates.email);
+    if (email && !isValidEmail(email)) return;
+
+    const trade = trimRequired(updates.trade);
+    if (!trade) return;
+
+    const sanitized = {
+      name,
+      company: trimOptional(updates.company),
+      trade,
+      phone_mobile: trimOptional(updates.phoneMobile),
+      phone_office: trimOptional(updates.phoneOffice),
+      email,
+      license_number: trimOptional(updates.licenseNumber),
+      insurance_provider: trimOptional(updates.insuranceProvider),
+      insurance_policy_number: trimOptional(updates.insurancePolicyNumber),
+      insurance_expires: updates.insuranceExpires && isValidDateStr(updates.insuranceExpires)
+        ? updates.insuranceExpires
+        : null,
+      coi_image: updates.coiImage || null,
+      rating: validateRating(updates.rating),
+      notes: trimOptional(updates.notes),
+    };
+
     const { error } = await supabase
       .from("contractors")
-      .update({
-        name: updates.name,
-        company: updates.company,
-        trade: updates.trade,
-        phone_mobile: updates.phoneMobile,
-        phone_office: updates.phoneOffice,
-        email: updates.email,
-        license_number: updates.licenseNumber,
-        insurance_provider: updates.insuranceProvider,
-        insurance_policy_number: updates.insurancePolicyNumber,
-        insurance_expires: updates.insuranceExpires || null,
-        coi_image: updates.coiImage,
-        rating: updates.rating,
-        notes: updates.notes,
-      })
-      .eq("id", contractorId);
-  
+      .update(sanitized)
+      .eq("id", contractorId)
+      .eq("user_id", userId);
+
     if (error) {
       console.error("Error updating contractor:", error);
       return;
     }
-  
+
     setContractors((prev) =>
       prev.map((c) => (c.id === contractorId ? {
         ...c,
-        name: updates.name,
-        company: updates.company,
-        trade: updates.trade,
-        phoneMobile: updates.phoneMobile,
-        phoneOffice: updates.phoneOffice,
-        email: updates.email,
-        licenseNumber: updates.licenseNumber,
-        insuranceProvider: updates.insuranceProvider,
-        insurancePolicyNumber: updates.insurancePolicyNumber,
-        insuranceExpires: updates.insuranceExpires,
-        coiImage: updates.coiImage,
-        rating: updates.rating,
-        notes: updates.notes,
+        name: sanitized.name,
+        company: sanitized.company,
+        trade: sanitized.trade,
+        phoneMobile: sanitized.phone_mobile,
+        phoneOffice: sanitized.phone_office,
+        email: sanitized.email,
+        licenseNumber: sanitized.license_number,
+        insuranceProvider: sanitized.insurance_provider,
+        insurancePolicyNumber: sanitized.insurance_policy_number,
+        insuranceExpires: sanitized.insurance_expires,
+        coiImage: sanitized.coi_image,
+        rating: sanitized.rating,
+        notes: sanitized.notes,
       } : c))
     );
   }
-  
+
   async function deleteContractor(contractorId) {
+    const userId = session?.user?.id;
+    if (!userId || !contractorId) return;
+
     const { error } = await supabase
       .from("contractors")
       .delete()
-      .eq("id", contractorId);
-  
+      .eq("id", contractorId)
+      .eq("user_id", userId);
+
     if (error) {
       console.error("Error deleting contractor:", error);
       return;
     }
-  
+
     setContractors((prev) => prev.filter((c) => c.id !== contractorId));
     setHomes((prev) =>
       prev.map((home) => ({
@@ -487,56 +665,72 @@ export default function App({ session }) {
   }
 
   async function addTrade(trade) {
-    if (tradeOptions.some((t) => t.toLowerCase() === trade.toLowerCase())) return;
-  
+    const userId = session?.user?.id;
+    if (!userId) return;
+
+    const trimmed = trimRequired(trade);
+    if (!trimmed) return;
+    if (tradeOptions.some((t) => t.toLowerCase() === trimmed.toLowerCase())) return;
+
     const { error } = await supabase
       .from("trades")
-      .insert({ user_id: session.user.id, name: trade });
-  
+      .insert({ user_id: userId, name: trimmed });
+
     if (error) {
       console.error("Error adding trade:", error);
       return;
     }
-  
-    setTradeOptions((prev) => [...prev, trade]);
+
+    setTradeOptions((prev) => [...prev, trimmed]);
   }
-  
+
   async function removeTrade(trade) {
+    const userId = session?.user?.id;
+    if (!userId || !trade) return;
+
     const { error } = await supabase
       .from("trades")
       .delete()
-      .eq("user_id", session.user.id)
+      .eq("user_id", userId)
       .eq("name", trade);
-  
+
     if (error) {
       console.error("Error removing trade:", error);
       return;
     }
-  
-    setTradeOptions((prev) => prev.filter((t) => t !== trade));
-  }
 
-  function removeTrade(trade) {
     setTradeOptions((prev) => prev.filter((t) => t !== trade));
   }
 
   async function addLibraryTask(item) {
+    const userId = session?.user?.id;
+    if (!userId) return;
+
+    const title = trimRequired(item.title);
+    if (!title) return;
+
+    const category = validateTaskCategory(item.category);
+    if (!category) return;
+
+    const frequencyMonths = validateFrequencyMonths(item.frequencyMonths);
+    if (frequencyMonths === null) return;
+
     const { data, error } = await supabase
       .from("task_library")
       .insert({
-        user_id: session.user.id,
-        title: item.title,
-        category: item.category,
-        frequency_months: item.frequencyMonths,
+        user_id: userId,
+        title,
+        category,
+        frequency_months: frequencyMonths,
       })
       .select()
       .single();
-  
+
     if (error) {
       console.error("Error adding library task:", error);
       return;
     }
-  
+
     setTaskLibrary((prev) => [...prev, {
       id: data.id,
       title: data.title,
@@ -544,38 +738,57 @@ export default function App({ session }) {
       frequencyMonths: data.frequency_months,
     }]);
   }
-  
+
   async function updateLibraryTask(id, updates) {
+    const userId = session?.user?.id;
+    if (!userId || !id) return;
+
+    const title = trimRequired(updates.title);
+    if (!title) return;
+
+    const category = validateTaskCategory(updates.category);
+    if (!category) return;
+
+    const frequencyMonths = validateFrequencyMonths(updates.frequencyMonths);
+    if (frequencyMonths === null) return;
+
+    const sanitized = { title, category, frequencyMonths };
+
     const { error } = await supabase
       .from("task_library")
       .update({
-        title: updates.title,
-        category: updates.category,
-        frequency_months: updates.frequencyMonths,
+        title,
+        category,
+        frequency_months: frequencyMonths,
       })
-      .eq("id", id);
-  
+      .eq("id", id)
+      .eq("user_id", userId);
+
     if (error) {
       console.error("Error updating library task:", error);
       return;
     }
-  
+
     setTaskLibrary((prev) =>
-      prev.map((item) => (item.id === id ? { ...item, ...updates } : item))
+      prev.map((item) => (item.id === id ? { ...item, ...sanitized } : item))
     );
   }
-  
+
   async function removeLibraryTask(id) {
+    const userId = session?.user?.id;
+    if (!userId || !id) return;
+
     const { error } = await supabase
       .from("task_library")
       .delete()
-      .eq("id", id);
-  
+      .eq("id", id)
+      .eq("user_id", userId);
+
     if (error) {
       console.error("Error removing library task:", error);
       return;
     }
-  
+
     setTaskLibrary((prev) => prev.filter((item) => item.id !== id));
   }
 
@@ -2180,11 +2393,9 @@ function ExpenseEditor({ expenses, onChange }) {
   function handleReceiptUpload(id, e) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      updateExpense(id, "receipt", { src: reader.result, name: file.name });
-    };
-    reader.readAsDataURL(file);
+    readValidatedImageFile(file, (image) => {
+      updateExpense(id, "receipt", image);
+    });
     e.target.value = "";
   }
 
@@ -2272,7 +2483,7 @@ function ExpenseEditor({ expenses, onChange }) {
                 Add receipt photo
                 <input
                   type="file"
-                  accept="image/*"
+                  accept="image/jpeg,image/png,image/webp"
                   onChange={(e) => handleReceiptUpload(expense.id, e)}
                   style={{ display: "none" }}
                 />
@@ -2301,11 +2512,9 @@ function ImageUploadGrid({ images, onChange }) {
   function handleFiles(e) {
     const files = Array.from(e.target.files || []);
     files.forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        onChange((prev) => [...prev, { id: "img" + Math.random().toString(36).slice(2, 9), src: reader.result, name: file.name }]);
-      };
-      reader.readAsDataURL(file);
+      readValidatedImageFile(file, (image) => {
+        onChange((prev) => [...prev, { id: "img" + Math.random().toString(36).slice(2, 9), ...image }]);
+      });
     });
     e.target.value = "";
   }
@@ -2375,7 +2584,7 @@ function ImageUploadGrid({ images, onChange }) {
           Add
           <input
             type="file"
-            accept="image/*"
+            accept="image/jpeg,image/png,image/webp"
             multiple
             onChange={handleFiles}
             style={{ display: "none" }}
@@ -2908,11 +3117,7 @@ function AddContractorModal({ tradeOptions, initial, onClose, onSave }) {
   function handleCoiUpload(e) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      setCoiImage({ src: reader.result, name: file.name });
-    };
-    reader.readAsDataURL(file);
+    readValidatedImageFile(file, setCoiImage);
     e.target.value = "";
   }
 
@@ -3069,7 +3274,7 @@ function AddContractorModal({ tradeOptions, initial, onClose, onSave }) {
             Add
             <input
               type="file"
-              accept="image/*"
+              accept="image/jpeg,image/png,image/webp"
               onChange={handleCoiUpload}
               style={{ display: "none" }}
             />
@@ -3608,11 +3813,7 @@ function PropertyForm({ initial, onSave, onCancel, saveLabel }) {
   function handleImageUpload(e) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      setImage({ src: reader.result, name: file.name });
-    };
-    reader.readAsDataURL(file);
+    readValidatedImageFile(file, setImage);
     e.target.value = "";
   }
 
@@ -3711,7 +3912,7 @@ function PropertyForm({ initial, onSave, onCancel, saveLabel }) {
             Add
             <input
               type="file"
-              accept="image/*"
+              accept="image/jpeg,image/png,image/webp"
               onChange={handleImageUpload}
               style={{ display: "none" }}
             />

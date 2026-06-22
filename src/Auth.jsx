@@ -14,12 +14,24 @@ export default function Auth() {
         setError("");
         setMessage("");
 
+        const trimmedEmail = email.trim();
+        if (!trimmedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+            setError("Please enter a valid email address.");
+            setLoading(false);
+            return;
+        }
+        if (password.length < 6) {
+            setError("Password must be at least 6 characters.");
+            setLoading(false);
+            return;
+        }
+
         if (mode === "signup") {
-            const { error } = await supabase.auth.signUp({ email, password });
+            const { error } = await supabase.auth.signUp({ email: trimmedEmail, password });
             if (error) setError(error.message);
             else setMessage("Check your email for a confirmation link.");
         } else {
-            const { error } = await supabase.auth.signInWithPassword({ email, password });
+            const { error } = await supabase.auth.signInWithPassword({ email: trimmedEmail, password });
             if (error) setError(error.message);
         }
 
