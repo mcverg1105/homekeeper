@@ -160,7 +160,10 @@ export default function App({ session }) {
         .select("*")
         .order("title");
   
-      if (homesData) setHomes(homesData);
+        if (homesData && homesData.length > 0) {
+          setHomes(homesData.map((h) => ({ ...h, tasks: [], projects: [], warranties: [] })));
+          setActiveHomeId(homesData[0].id);
+        }
       if (contractorsData) setContractors(contractorsData);
       if (tradesData) setTradeOptions(tradesData.map((t) => t.name));
       if (taskLibraryData) setTaskLibrary(taskLibraryData.map((t) => ({
