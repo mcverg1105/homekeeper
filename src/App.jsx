@@ -338,29 +338,118 @@ export default function App({ session }) {
     }
   }
 
-  function addContractor(newContractor) {
-    const id = "c" + Math.random().toString(36).slice(2, 9);
-    setContractors((prev) => [...prev, { id, ...newContractor }]);
+  async function addContractor(newContractor) {
+    const { data, error } = await supabase
+      .from("contractors")
+      .insert({
+        user_id: session.user.id,
+        name: newContractor.name,
+        company: newContractor.company,
+        trade: newContractor.trade,
+        phone_mobile: newContractor.phoneMobile,
+        phone_office: newContractor.phoneOffice,
+        email: newContractor.email,
+        license_number: newContractor.licenseNumber,
+        insurance_provider: newContractor.insuranceProvider,
+        insurance_policy_number: newContractor.insurancePolicyNumber,
+        insurance_expires: newContractor.insuranceExpires || null,
+        coi_image: newContractor.coiImage,
+        rating: newContractor.rating,
+        notes: newContractor.notes,
+      })
+      .select()
+      .single();
+  
+    if (error) {
+      console.error("Error adding contractor:", error);
+      return;
+    }
+  
+    setContractors((prev) => [...prev, {
+      id: data.id,
+      name: data.name,
+      company: data.company,
+      trade: data.trade,
+      phoneMobile: data.phone_mobile,
+      phoneOffice: data.phone_office,
+      email: data.email,
+      licenseNumber: data.license_number,
+      insuranceProvider: data.insurance_provider,
+      insurancePolicyNumber: data.insurance_policy_number,
+      insuranceExpires: data.insurance_expires,
+      coiImage: data.coi_image,
+      rating: data.rating,
+      notes: data.notes,
+    }]);
     setEditingContractor(null);
   }
-
-  function editContractor(contractorId, updates) {
+  
+  async function editContractor(contractorId, updates) {
+    const { error } = await supabase
+      .from("contractors")
+      .update({
+        name: updates.name,
+        company: updates.company,
+        trade: updates.trade,
+        phone_mobile: updates.phoneMobile,
+        phone_office: updates.phoneOffice,
+        email: updates.email,
+        license_number: updates.licenseNumber,
+        insurance_provider: updates.insuranceProvider,
+        insurance_policy_number: updates.insurancePolicyNumber,
+        insurance_expires: updates.insuranceExpires || null,
+        coi_image: updates.coiImage,
+        rating: updates.rating,
+        notes: updates.notes,
+      })
+      .eq("id", contractorId);
+  
+    if (error) {
+      console.error("Error updating contractor:", error);
+      return;
+    }
+  
     setContractors((prev) =>
-      prev.map((c) => (c.id === contractorId ? { ...c, ...updates } : c))
+      prev.map((c) => (c.id === contractorId ? {
+        ...c,
+        name: updates.name,
+        company: updates.company,
+        trade: updates.trade,
+        phoneMobile: updates.phoneMobile,
+        phoneOffice: updates.phoneOffice,
+        email: updates.email,
+        licenseNumber: updates.licenseNumber,
+        insuranceProvider: updates.insuranceProvider,
+        insurancePolicyNumber: updates.insurancePolicyNumber,
+        insuranceExpires: updates.insuranceExpires,
+        coiImage: updates.coiImage,
+        rating: updates.rating,
+        notes: updates.notes,
+      } : c))
     );
   }
-
-  function deleteContractor(contractorId) {
+  
+  async function deleteContractor(contractorId) {
+    const { error } = await supabase
+      .from("contractors")
+      .delete()
+      .eq("id", contractorId);
+  
+    if (error) {
+      console.error("Error deleting contractor:", error);
+      return;
+    }
+  
     setContractors((prev) => prev.filter((c) => c.id !== contractorId));
     setHomes((prev) =>
       prev.map((home) => ({
         ...home,
-        tasks: home.tasks.map((t) => ({
+        tasks: (home.tasks || []).map((t) => ({
           ...t,
           contractorId: t.contractorId === contractorId ? null : t.contractorId,
           contractorIds: (t.contractorIds || []).filter((id) => id !== contractorId),
         })),
-        projects: home.projects.map((p) => ({
+        projects: (home.projects || []).map((p) => ({
           ...p,
           contractorIds: (p.contractorIds || []).filter((id) => id !== contractorId),
         })),
@@ -525,7 +614,10 @@ export default function App({ session }) {
         tasks={homes.flatMap((h) => h.tasks || [])}
         projects={homes.flatMap((h) => h.projects || [])}
         onAddContractor={() => setEditingContractor("new")}
-        onEditContractor={(c) => setEditingContractor(c)}
+        onEditContractor={(c) => {
+          setEditingContractor(c);
+          setShowSettings(false);
+        }}
         onDeleteContractor={deleteContractor}
         onClose={() => setShowSettings(false)}
       />
@@ -814,21 +906,7 @@ export default function App({ session }) {
           }}
         />
       )}
-      {editingContractor && (
-        <AddContractorModal
-          tradeOptions={tradeOptions}
-          initial={editingContractor === "new" ? null : editingContractor}
-          onClose={() => setEditingContractor(null)}
-          onSave={(data) => {
-            if (editingContractor === "new") {
-              addContractor(data);
-            } else {
-              editContractor(editingContractor.id, data);
-              setEditingContractor(null);
-            }
-          }}
-        />
-      )}
+ 
       {showSettings && (
         <SettingsModal
           tradeOptions={tradeOptions}
@@ -846,9 +924,27 @@ export default function App({ session }) {
           tasks={homes.flatMap((h) => h.tasks)}
           projects={homes.flatMap((h) => h.projects)}
           onAddContractor={() => setEditingContractor("new")}
-          onEditContractor={(c) => setEditingContractor(c)}
+          onEditContractor={(c) => {
+            setEditingContractor(c);
+            setShowSettings(false);
+          }}
           onDeleteContractor={deleteContractor}
           onClose={() => setShowSettings(false)}
+        />
+      )}     
+      {editingContractor && (
+        <AddContractorModal
+          tradeOptions={tradeOptions}
+          initial={editingContractor === "new" ? null : editingContractor}
+          onClose={() => setEditingContractor(null)}
+          onSave={(data) => {
+            if (editingContractor === "new") {
+              addContractor(data);
+            } else {
+              editContractor(editingContractor.id, data);
+              setEditingContractor(null);
+            }
+          }}
         />
       )}
       {editingWarranty && (
@@ -1900,7 +1996,7 @@ function Modal({ title, onClose, children }) {
         alignItems: "center",
         justifyContent: "center",
         padding: 20,
-        zIndex: 50,
+        zIndex: 2000,
       }}
       onClick={onClose}
     >
