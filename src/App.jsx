@@ -25,7 +25,7 @@ import {
   Calendar,
   History,
 } from "lucide-react";
-
+import { supabase } from "./supabase";
 // ============================================================================
 // MOCK DATA
 // All data below is hardcoded mock data for frontend development only.
@@ -255,7 +255,7 @@ const DEFAULT_TASK_LIBRARY = [
 // MAIN APP
 // ============================================================================
 
-export default function App() {
+export default function App({ session }) {
   const [homes, setHomes] = useState(INITIAL_HOMES);
   const [contractors, setContractors] = useState(INITIAL_CONTRACTORS);
   const [theme, setTheme] = useState("light"); // 'light' | 'dark'
@@ -291,25 +291,25 @@ export default function App() {
       tasks: home.tasks.map((t) =>
         t.id === taskId
           ? {
-              ...t,
-              lastDone: completion.dateCompleted,
-              nextDue: completion.nextDate,
-              contractorIds: completion.contractorIds,
-              completionNotes: completion.notes,
-              images: [...(t.images || []), ...(completion.images || [])],
-              completionExpenses: completion.expenses || [],
-              completionHistory: [
-                {
-                  id: "ch" + Math.random().toString(36).slice(2, 9),
-                  dateCompleted: completion.dateCompleted,
-                  contractorIds: completion.contractorIds || [],
-                  notes: completion.notes,
-                  images: completion.images || [],
-                  expenses: completion.expenses || [],
-                },
-                ...(t.completionHistory || []),
-              ],
-            }
+            ...t,
+            lastDone: completion.dateCompleted,
+            nextDue: completion.nextDate,
+            contractorIds: completion.contractorIds,
+            completionNotes: completion.notes,
+            images: [...(t.images || []), ...(completion.images || [])],
+            completionExpenses: completion.expenses || [],
+            completionHistory: [
+              {
+                id: "ch" + Math.random().toString(36).slice(2, 9),
+                dateCompleted: completion.dateCompleted,
+                contractorIds: completion.contractorIds || [],
+                notes: completion.notes,
+                images: completion.images || [],
+                expenses: completion.expenses || [],
+              },
+              ...(t.completionHistory || []),
+            ],
+          }
           : t
       ),
     }));
@@ -537,6 +537,25 @@ export default function App() {
               HomeKeeper
             </span>
           </div>
+          <button
+            onClick={() => supabase.auth.signOut()}
+            title="Sign out"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              height: 36,
+              padding: "0 12px",
+              borderRadius: 8,
+              border: "1px solid var(--border)",
+              background: "var(--surface)",
+              color: "var(--text-secondary)",
+              fontSize: 13,
+              marginRight: 8,
+            }}
+          >
+            Sign out
+          </button>
           <button
             onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
             title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
