@@ -1,4 +1,32 @@
-# Changelog
+# I'm continuing development of HomeKeeper, a React/Vite app with Supabase backend, deployed on Vercel. 
+
+Current status:
+
+- Auth works (sign in/sign up/sign out via Supabase Auth)
+
+- Homes, trades, task library, and contractors are fully wired to Supabase (load, add, edit, delete)
+
+- All 8 Supabase tables exist with RLS policies
+
+- App is in src/App.jsx, Supabase client in src/supabase.js, auth in src/Auth.jsx
+
+- Last working git commit: "Wire up contractors to Supabase, fix modal z-index ordering"
+
+Next task: Wire up addTask and deleteTask to Supabase.
+
+The tasks table has these columns:
+
+id, home_id, user_id, title, category, frequency_months, last_done, next_due, contractor_id, notes, images, completion_notes, completion_expenses, created_at
+
+The app uses camelCase internally (frequencyMonths, lastDone, nextDue, contractorId) but the database uses snake_case (frequency_months, last_done, next_due, contractor_id).
+
+The addTask function currently looks like this in App.jsx:
+
+[paste your current addTask function here]
+
+Please give me the complete replacement for addTask and deleteTask as one clean block to paste in, with clear instructions on exactly where to place it.
+
+Changelog
 
 All notable changes to HomeKeeper so far, in roughly chronological order.
 
@@ -93,4 +121,58 @@ All notable changes to HomeKeeper so far, in roughly chronological order.
 - Replace in-memory React state with Supabase reads/writes, likely feature-by-feature starting with properties + auth.
 - Add Supabase environment variables (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`) to `.env` (gitignored) and to Vercel project settings.
 - Optional polish: custom domain, multi-user/shared-property access model.
+
+## Supabase Integration (In Progress)
+
+### Completed
+
+- Created Supabase project with RLS enabled and email auth configured
+
+- Created all 8 database tables with RLS policies: homes, tasks, task_completions, projects, contractors, warranties, trades, task_library
+
+- Granted authenticated role permissions on all tables
+
+- Created src/supabase.js to initialize Supabase client
+
+- Created src/Auth.jsx with sign in / sign up / sign out flow
+
+- Updated src/main.jsx to gate the app behind auth
+
+- Added Sign out button to App header
+
+- Wired homes: load on login, add, edit, delete all save to Supabase
+
+- Wired trades: add and remove save to Supabase
+
+- Wired task library: add, edit, delete save to Supabase
+
+- Wired contractors: add, edit, delete save to Supabase
+
+- Fixed modal z-index ordering (EditContractor now appears above Manage modal)
+
+- Replaced hardcoded TODAY with new Date() for accurate due date calculations
+
+- Added useEffect to load tasks when active home changes
+
+- Removed all mock data (INITIAL_HOMES, INITIAL_CONTRACTORS)
+
+- Added empty state screen when no properties exist (shows gear icon to open Manage)
+
+### Last working git commit
+
+"Wire up contractors to Supabase, fix modal z-index ordering"
+
+### Not yet wired to Supabase (still local state only)
+
+- addTask / deleteTask / completeTask
+
+- addProject / editProject / deleteProject
+
+- addWarranty / editWarranty / deleteWarranty
+
+- Tasks, projects, warranties loading from Supabase
+
+### Next step
+
+Wire up addTask and deleteTask to Supabase. The addTask function needs to insert into the tasks table and update local state. The deleteTask function needs to delete from the tasks table and update local state.
 
