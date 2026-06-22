@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   Home,
   Plus,
@@ -26,149 +26,12 @@ import {
   History,
 } from "lucide-react";
 import { supabase } from "./supabase";
-// ============================================================================
-// MOCK DATA
-// All data below is hardcoded mock data for frontend development only.
-// No real database, API keys, or backend connections are present here.
-// ============================================================================
-
-const INITIAL_CONTRACTORS = [
-  {
-    id: "c1",
-    name: "Mike Donnelly",
-    company: "Donnelly Plumbing & Heating",
-    trade: "Plumbing",
-    phoneMobile: "(555) 412-8890",
-    phoneOffice: "(555) 412-8800",
-    email: "mike@donnellyplumbing.com",
-    licenseNumber: "PA-PL-009284",
-    rating: 5,
-    notes: "Fixed the kitchen faucet leak in Feb 2026. Fast and reasonably priced. Ask for Mike directly.",
-  },
-  {
-    id: "c2",
-    name: "Priya Anand",
-    company: "Anand Electric",
-    trade: "Electrical",
-    phoneMobile: "(555) 778-2210",
-    phoneOffice: "",
-    email: "priya@anandelectric.com",
-    licenseNumber: "PA-EL-114477",
-    rating: 4,
-    notes: "Rewired the garage outlets. Licensed and insured, takes a couple days to schedule.",
-  },
-  {
-    id: "c3",
-    name: "Tom Belcher",
-    company: "Belcher Roofing",
-    trade: "Roofing",
-    phoneMobile: "(555) 309-6644",
-    phoneOffice: "(555) 309-6600",
-    email: "tom@belcherroofing.com",
-    licenseNumber: "PA-RF-552031",
-    rating: 5,
-    notes: "Did the roof inspection after the spring storms. Honest about what did and didn't need fixing.",
-  },
-];
-
-const INITIAL_HOMES = [
-  {
-    id: "home-1",
-    name: "Maple Street House",
-    address: "412 Maple Street, Springfield",
-    color: "#2F4A3E",
-    tasks: [
-      { id: "t1", title: "Replace HVAC filter", category: "HVAC", frequencyMonths: 3, lastDone: "2026-03-10", nextDue: "2026-06-10" },
-      { id: "t2", title: "Clean gutters", category: "Exterior", frequencyMonths: 6, lastDone: "2025-12-01", nextDue: "2026-06-01" },
-      { id: "t3", title: "Test smoke & CO detectors", category: "Safety", frequencyMonths: 6, lastDone: "2026-01-15", nextDue: "2026-07-15" },
-      { id: "t4", title: "Service HVAC system", category: "HVAC", frequencyMonths: 12, lastDone: "2025-09-01", nextDue: "2026-09-01" },
-      { id: "t5", title: "Flush water heater", category: "Plumbing", frequencyMonths: 12, lastDone: "2025-05-20", nextDue: "2026-05-20" },
-    ],
-    projects: [
-      {
-        id: "p1",
-        title: "Living room repaint",
-        date: "2025-09-12",
-        notes: "Two coats over primer. Removed old wallpaper first.",
-        paints: [
-          { name: "Sherwin-Williams Sea Salt", hex: "#C7D4CC", location: "Living room walls" },
-          { name: "Behr Polar Bear", hex: "#F2F1EC", location: "Trim & ceiling" },
-        ],
-      },
-      {
-        id: "p2",
-        title: "Replaced kitchen faucet",
-        date: "2026-02-03",
-        notes: "Moen brand, model number on receipt in project folder.",
-        paints: [],
-      },
-    ],
-    warranties: [
-      {
-        id: "w1",
-        name: "Kitchen Faucet",
-        manufacturer: "Moen",
-        model: "Arbor 7594",
-        serialNumber: "MA-2026-00451",
-        purchasedFrom: "Home Depot",
-        purchasePrice: "189.00",
-        dateInstalled: "2026-02-03",
-        dateExpires: "2031-02-03",
-        provider: "Moen Limited Lifetime Warranty",
-        providerContact: "1-800-289-6636",
-        contractorId: "c1",
-        notes: "Lifetime warranty on finish and function, registered online.",
-        images: [],
-      },
-    ],
-  },
-  {
-    id: "home-2",
-    name: "Lakeview Cabin",
-    address: "88 Birchwood Trail, Lake Carmel",
-    color: "#C4644A",
-    tasks: [
-      { id: "t6", title: "Inspect roof for damage", category: "Exterior", frequencyMonths: 12, lastDone: "2025-05-01", nextDue: "2026-05-01" },
-      { id: "t7", title: "Check sump pump", category: "Plumbing", frequencyMonths: 6, lastDone: "2026-04-01", nextDue: "2026-10-01" },
-      { id: "t8", title: "Deep clean dryer vent", category: "Appliances", frequencyMonths: 12, lastDone: "2025-06-15", nextDue: "2026-06-15" },
-    ],
-    projects: [
-      {
-        id: "p3",
-        title: "Exterior deck stain",
-        date: "2025-07-04",
-        notes: "Applied two coats, sanded lightly between coats.",
-        paints: [
-          { name: "Cabot Semi-Solid Cordovan Brown", hex: "#6E4534", location: "Deck boards & railing" },
-        ],
-      },
-    ],
-    warranties: [
-      {
-        id: "w2",
-        name: "Roof Shingles",
-        manufacturer: "GAF",
-        model: "Timberline HDZ",
-        serialNumber: "",
-        purchasedFrom: "Belcher Roofing",
-        purchasePrice: "",
-        dateInstalled: "2024-08-15",
-        dateExpires: "2054-08-15",
-        provider: "GAF System Plus Limited Warranty",
-        providerContact: "",
-        contractorId: "c3",
-        notes: "30-year manufacturer warranty, registration confirmation in email.",
-        images: [],
-      },
-    ],
-  },
-];
 
 // ============================================================================
 // HELPERS
 // ============================================================================
 
-const TODAY = new Date("2026-06-13");
+const TODAY = new Date();
 
 function daysUntil(dateStr) {
   const due = new Date(dateStr);
@@ -256,19 +119,62 @@ const DEFAULT_TASK_LIBRARY = [
 // ============================================================================
 
 export default function App({ session }) {
-  const [homes, setHomes] = useState(INITIAL_HOMES);
-  const [contractors, setContractors] = useState(INITIAL_CONTRACTORS);
+  const [homes, setHomes] = useState([]);
+  const [contractors, setContractors] = useState([]);
+  const [loadingData, setLoadingData] = useState(true);
   const [theme, setTheme] = useState("light"); // 'light' | 'dark'
-  const [activeHomeId, setActiveHomeId] = useState(INITIAL_HOMES[0].id);
+  const [activeHomeId, setActiveHomeId] = useState(null);
   const [view, setView] = useState("maintenance"); // 'maintenance' | 'projects'
   const [showAddTask, setShowAddTask] = useState(false);
   const [editingProject, setEditingProject] = useState(null); // null | "new" | project object
   const [editingContractor, setEditingContractor] = useState(null); // null | "new" | contractor object
   const [showSettings, setShowSettings] = useState(false);
-  const [tradeOptions, setTradeOptions] = useState(DEFAULT_TRADES);
-  const [taskLibrary, setTaskLibrary] = useState(DEFAULT_TASK_LIBRARY);
+  const [tradeOptions, setTradeOptions] = useState([]);
+  const [taskLibrary, setTaskLibrary] = useState([]);
   const [completingTask, setCompletingTask] = useState(null);
   const [editingWarranty, setEditingWarranty] = useState(null); // null | "new" | warranty object
+
+  useEffect(() => {
+    if (!session) return;
+  
+    async function loadData() {
+      setLoadingData(true);
+  
+      const { data: homesData } = await supabase
+      .from("homes")
+      .select("*")
+      .order("name");
+  
+      const { data: contractorsData } = await supabase
+        .from("contractors")
+        .select("*")
+        .order("name");
+  
+      const { data: tradesData } = await supabase
+        .from("trades")
+        .select("*")
+        .order("name");
+  
+      const { data: taskLibraryData } = await supabase
+        .from("task_library")
+        .select("*")
+        .order("title");
+  
+      if (homesData) setHomes(homesData);
+      if (contractorsData) setContractors(contractorsData);
+      if (tradesData) setTradeOptions(tradesData.map((t) => t.name));
+      if (taskLibraryData) setTaskLibrary(taskLibraryData.map((t) => ({
+        id: t.id,
+        title: t.title,
+        category: t.category,
+        frequencyMonths: t.frequency_months,
+      })));
+  
+      setLoadingData(false);
+    }
+  
+    loadData();
+  }, [session]);
 
   const activeHome = homes.find((h) => h.id === activeHomeId);
 
@@ -368,13 +274,26 @@ export default function App({ session }) {
     }));
   }
 
-  function addHome(newHome) {
-    const id = "home-" + Math.random().toString(36).slice(2, 9);
-    setHomes((prev) => [
-      ...prev,
-      { id, ...newHome, tasks: [], projects: [], warranties: [] },
-    ]);
-    setActiveHomeId(id);
+  async function addHome(newHome) {
+    const { data, error } = await supabase
+      .from("homes")
+      .insert({
+        user_id: session.user.id,
+        name: newHome.name,
+        address: newHome.address,
+        color: newHome.color,
+        image: newHome.image,
+      })
+      .select()
+      .single();
+  
+    if (error) {
+      console.error("Error adding home:", error);
+      return;
+    }
+  
+    setHomes((prev) => [...prev, { ...data, tasks: [], projects: [], warranties: [] }]);
+    setActiveHomeId(data.id);
   }
 
   function editHome(homeId, updates) {
@@ -477,7 +396,48 @@ export default function App({ session }) {
     setTaskLibrary((prev) => prev.filter((item) => item.id !== id));
   }
 
-  if (!activeHome) return null;
+  if (!activeHome) return (
+    <div data-theme={theme} style={{ minHeight: "100vh", background: "var(--bg)", fontFamily: "Inter, system-ui, sans-serif" }}>
+      <style>{`
+        :root { --bg: #F7F4EF; --surface: #FFFFFF; --text: #2C2C2A; --text-secondary: #5F5E5A; --text-muted: #888780; --border: #E4DFD3; --subtle: #F1EFE8; }
+        [data-theme="dark"] { --bg: #1C1C1A; --surface: #262624; --text: #EDEAE3; --text-secondary: #B8B5AD; --text-muted: #8A8780; --border: #3A3936; --subtle: #303030; }
+      `}</style>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "20px 24px", borderBottom: "1px solid var(--border)", background: "var(--surface)" }}>
+        <span style={{ fontFamily: "'Source Serif 4', serif", fontSize: 22, fontWeight: 600 }}>HomeKeeper</span>
+        <button
+          onClick={() => setShowSettings(true)}
+          style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text-secondary)", cursor: "pointer" }}
+        >
+          <Settings size={17} />
+        </button>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 16, minHeight: "calc(100vh - 77px)" }}>
+        <p style={{ color: "var(--text-muted)", fontSize: 14 }}>No properties yet. Add one under the gear icon.</p>
+      </div>
+      {showSettings && (
+      <SettingsModal
+        tradeOptions={tradeOptions}
+        onAddTrade={addTrade}
+        onRemoveTrade={removeTrade}
+        taskLibrary={taskLibrary}
+        onAddLibraryTask={addLibraryTask}
+        onUpdateLibraryTask={updateLibraryTask}
+        onRemoveLibraryTask={removeLibraryTask}
+        homes={homes}
+        onAddHome={addHome}
+        onEditHome={editHome}
+        onDeleteHome={deleteHome}
+        contractors={contractors}
+        tasks={homes.flatMap((h) => h.tasks || [])}
+        projects={homes.flatMap((h) => h.projects || [])}
+        onAddContractor={() => setEditingContractor("new")}
+        onEditContractor={(c) => setEditingContractor(c)}
+        onDeleteContractor={deleteContractor}
+        onClose={() => setShowSettings(false)}
+      />
+    )}
+  </div>
+);
 
   return (
     <div
