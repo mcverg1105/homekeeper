@@ -299,20 +299,43 @@ export default function App({ session }) {
     setActiveHomeId(data.id);
   }
 
-  function editHome(homeId, updates) {
+  async function editHome(homeId, updates) {
+    const { error } = await supabase
+      .from("homes")
+      .update({
+        name: updates.name,
+        address: updates.address,
+        color: updates.color,
+        image: updates.image,
+      })
+      .eq("id", homeId);
+  
+    if (error) {
+      console.error("Error updating home:", error);
+      return;
+    }
+  
     setHomes((prev) =>
       prev.map((h) => (h.id === homeId ? { ...h, ...updates } : h))
     );
   }
 
-  function deleteHome(homeId) {
-    setHomes((prev) => {
-      const next = prev.filter((h) => h.id !== homeId);
-      if (activeHomeId === homeId && next.length > 0) {
-        setActiveHomeId(next[0].id);
-      }
-      return next;
-    });
+  async function deleteHome(homeId) {
+    const { error } = await supabase
+      .from("homes")
+      .delete()
+      .eq("id", homeId);
+  
+    if (error) {
+      console.error("Error deleting home:", error);
+      return;
+    }
+  
+    const remaining = homes.filter((h) => h.id !== homeId);
+    setHomes(remaining);
+    if (activeHomeId === homeId) {
+      setActiveHomeId(remaining.length > 0 ? remaining[0].id : null);
+    }
   }
 
   function addContractor(newContractor) {
