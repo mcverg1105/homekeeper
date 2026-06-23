@@ -418,21 +418,17 @@ useEffect(() => {
 
 - ✅ task_library (load, add, edit, remove)
 
-- ✅ tasks (load when active home changes via second useEffect)
+- ✅ tasks (load when active home changes, add, delete, complete)
+
+- ✅ task_completions (load with tasks, insert on complete)
+
+- ✅ projects (load when active home changes, add, edit, delete)
+
+- ✅ warranties (load when active home changes, add, edit, delete)
 
 ## WHAT STILL NEEDS TO BE WIRED TO SUPABASE
 
-- ❌ addTask
-
-- ❌ deleteTask
-
-- ❌ completeTask (mark done — saves to tasks table AND task_completions table)
-
-- ❌ addProject / editProject / deleteProject
-
-- ❌ addWarranty / editWarranty / deleteWarranty
-
-- ❌ Image uploads (should move to Supabase Storage, currently base64 in memory)
+- ❌ Image uploads (should move to Supabase Storage, currently base64 in JSONB)
 
 ---
 

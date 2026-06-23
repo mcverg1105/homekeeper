@@ -133,6 +133,71 @@ function readValidatedImageFile(file, onLoad) {
   reader.readAsDataURL(file);
 }
 
+function validateContractorIds(ids, contractors) {
+  if (!Array.isArray(ids)) return [];
+  return ids.filter((id) => contractors.some((c) => c.id === id));
+}
+
+function mapCompletionFromDb(row) {
+  return {
+    id: row.id,
+    dateCompleted: row.date_completed,
+    contractorIds: row.contractor_ids || [],
+    notes: row.notes,
+    images: row.images || [],
+    expenses: row.expenses || [],
+  };
+}
+
+function mapTaskFromDb(row, completionHistory = []) {
+  return {
+    id: row.id,
+    title: row.title,
+    category: row.category,
+    frequencyMonths: row.frequency_months,
+    lastDone: row.last_done,
+    nextDue: row.next_due,
+    contractorId: row.contractor_id,
+    notes: row.notes,
+    images: row.images || [],
+    completionNotes: row.completion_notes,
+    completionExpenses: row.completion_expenses || [],
+    completionHistory,
+  };
+}
+
+function mapProjectFromDb(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    date: row.date,
+    notes: row.notes,
+    paints: row.paints || [],
+    contractorIds: row.contractor_ids || [],
+    images: row.images || [],
+    expenses: row.expenses || [],
+  };
+}
+
+function mapWarrantyFromDb(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    manufacturer: row.manufacturer,
+    model: row.model,
+    serialNumber: row.serial_number,
+    purchasedFrom: row.purchased_from,
+    purchasePrice: row.purchase_price,
+    dateInstalled: row.date_installed,
+    dateExpires: row.date_expires,
+    provider: row.provider,
+    providerContact: row.provider_contact,
+    contractorId: row.contractor_id,
+    notes: row.notes,
+    images: row.images || [],
+  };
+}
+
 const STATUS_STYLES = {
   overdue: { bg: "#FBEAF0", text: "#72243E", label: "Overdue", icon: AlertCircle },
   soon: { bg: "#FAEEDA", text: "#854F0B", label: "Due soon", icon: Clock },
@@ -156,21 +221,6 @@ const TRADE_COLORS = {
   Landscaping: "#639922",
   General: "var(--text-muted)",
 };
-
-const DEFAULT_TRADES = ["Plumbing", "Electrical", "Roofing", "HVAC", "Landscaping", "General"];
-
-const DEFAULT_TASK_LIBRARY = [
-  { id: "tl1", title: "Replace HVAC filter", category: "HVAC", frequencyMonths: 3 },
-  { id: "tl2", title: "Test smoke & CO detectors", category: "Safety", frequencyMonths: 6 },
-  { id: "tl3", title: "Clean gutters", category: "Exterior", frequencyMonths: 6 },
-  { id: "tl4", title: "Flush water heater", category: "Plumbing", frequencyMonths: 12 },
-  { id: "tl5", title: "Service HVAC system", category: "HVAC", frequencyMonths: 12 },
-  { id: "tl6", title: "Inspect roof for damage", category: "Exterior", frequencyMonths: 12 },
-  { id: "tl7", title: "Deep clean dryer vent", category: "Appliances", frequencyMonths: 12 },
-  { id: "tl8", title: "Reseal exterior wood/deck", category: "Exterior", frequencyMonths: 24 },
-  { id: "tl9", title: "Check sump pump", category: "Plumbing", frequencyMonths: 6 },
-  { id: "tl10", title: "Inspect caulking around windows", category: "Exterior", frequencyMonths: 12 },
-];
 
 // ============================================================================
 // MAIN APP
@@ -242,6 +292,61 @@ export default function App({ session }) {
     loadData();
   }, [session]);
 
+  useEffect(() => {
+    if (!session || !activeHomeId) return;
+
+    async function loadHomeData() {
+      const { data: tasksData, error: tasksError } = await supabase
+        .from("tasks")
+        .select("*")
+        .eq("home_id", activeHomeId)
+        .order("next_due");
+
+      const { data: projectsData, error: projectsError } = await supabase
+        .from("projects")
+        .select("*")
+        .eq("home_id", activeHomeId)
+        .order("date", { ascending: false });
+
+      const { data: warrantiesData, error: warrantiesError } = await supabase
+        .from("warranties")
+        .select("*")
+        .eq("home_id", activeHomeId)
+        .order("date_expires");
+
+      if (tasksError) console.error("Error loading tasks:", tasksError);
+      if (projectsError) console.error("Error loading projects:", projectsError);
+      if (warrantiesError) console.error("Error loading warranties:", warrantiesError);
+
+      let completionsByTask = {};
+      if (tasksData && tasksData.length > 0) {
+        const taskIds = tasksData.map((t) => t.id);
+        const { data: completionsData, error: completionsError } = await supabase
+          .from("task_completions")
+          .select("*")
+          .in("task_id", taskIds)
+          .order("date_completed", { ascending: false });
+
+        if (completionsError) console.error("Error loading task completions:", completionsError);
+        if (completionsData) {
+          for (const row of completionsData) {
+            if (!completionsByTask[row.task_id]) completionsByTask[row.task_id] = [];
+            completionsByTask[row.task_id].push(mapCompletionFromDb(row));
+          }
+        }
+      }
+
+      updateHome(activeHomeId, (home) => ({
+        ...home,
+        tasks: (tasksData || []).map((t) => mapTaskFromDb(t, completionsByTask[t.id] || [])),
+        projects: (projectsData || []).map(mapProjectFromDb),
+        warranties: (warrantiesData || []).map(mapWarrantyFromDb),
+      }));
+    }
+
+    loadHomeData();
+  }, [session, activeHomeId]);
+
   const activeHome = homes.find((h) => h.id === activeHomeId);
 
   const sortedTasks = useMemo(() => {
@@ -257,34 +362,75 @@ export default function App({ session }) {
     );
   }
 
-  function completeTask(taskId, completion) {
+  async function completeTask(taskId, completion) {
+    const userId = session?.user?.id;
+    if (!userId || !activeHomeId || !taskId) return false;
+
+    const task = activeHome?.tasks.find((t) => t.id === taskId);
+    if (!task) return false;
+
+    if (!isValidDateStr(completion.dateCompleted) || !isValidDateStr(completion.nextDate)) {
+      return false;
+    }
+
+    const contractorIds = validateContractorIds(completion.contractorIds, contractors);
+    const notes = trimOptional(completion.notes);
+    const images = Array.isArray(completion.images) ? completion.images : [];
+    const expenses = Array.isArray(completion.expenses) ? completion.expenses : [];
+    const mergedImages = [...(task.images || []), ...images];
+
+    const { data: completionRow, error: completionError } = await supabase
+      .from("task_completions")
+      .insert({
+        task_id: taskId,
+        user_id: userId,
+        date_completed: completion.dateCompleted,
+        contractor_ids: contractorIds,
+        notes,
+        images,
+        expenses,
+      })
+      .select()
+      .single();
+
+    if (completionError) {
+      console.error("Error saving task completion:", completionError);
+      return false;
+    }
+
+    const { data: updatedTask, error: taskError } = await supabase
+      .from("tasks")
+      .update({
+        last_done: completion.dateCompleted,
+        next_due: completion.nextDate,
+        completion_notes: notes,
+        completion_expenses: expenses,
+        images: mergedImages,
+      })
+      .eq("id", taskId)
+      .eq("user_id", userId)
+      .select()
+      .single();
+
+    if (taskError) {
+      console.error("Error updating task:", taskError);
+      return false;
+    }
+
+    const historyEntry = mapCompletionFromDb(completionRow);
+
     updateHome(activeHomeId, (home) => ({
       ...home,
       tasks: home.tasks.map((t) =>
         t.id === taskId
           ? {
-            ...t,
-            lastDone: completion.dateCompleted,
-            nextDue: completion.nextDate,
-            contractorIds: completion.contractorIds,
-            completionNotes: completion.notes,
-            images: [...(t.images || []), ...(completion.images || [])],
-            completionExpenses: completion.expenses || [],
-            completionHistory: [
-              {
-                id: "ch" + Math.random().toString(36).slice(2, 9),
-                dateCompleted: completion.dateCompleted,
-                contractorIds: completion.contractorIds || [],
-                notes: completion.notes,
-                images: completion.images || [],
-                expenses: completion.expenses || [],
-              },
-              ...(t.completionHistory || []),
-            ],
+            ...mapTaskFromDb(updatedTask, [historyEntry, ...(t.completionHistory || [])]),
+            contractorIds,
           }
           : t
       ),
     }));
+    return true;
   }
 
   async function addTask(newTask) {
@@ -331,22 +477,7 @@ export default function App({ session }) {
 
     updateHome(activeHomeId, (home) => ({
       ...home,
-      tasks: [
-        ...home.tasks,
-        {
-          id: data.id,
-          title: data.title,
-          category: data.category,
-          frequencyMonths: data.frequency_months,
-          lastDone: data.last_done,
-          nextDue: data.next_due,
-          contractorId: data.contractor_id,
-          notes: data.notes,
-          images: data.images || [],
-          completionNotes: data.completion_notes,
-          completionExpenses: data.completion_expenses || [],
-        },
-      ],
+      tasks: [...home.tasks, mapTaskFromDb(data)],
     }));
     setShowAddTask(false);
   }
@@ -372,25 +503,105 @@ export default function App({ session }) {
     }));
   }
 
-  function addProject(newProject) {
-    const id = "p" + Math.random().toString(36).slice(2, 9);
+  async function addProject(newProject) {
+    const userId = session?.user?.id;
+    if (!userId || !activeHomeId) return;
+
+    const title = trimRequired(newProject.title);
+    if (!title) return;
+
+    const date = isValidDateStr(newProject.date)
+      ? newProject.date
+      : TODAY.toISOString().split("T")[0];
+
+    const contractorIds = validateContractorIds(newProject.contractorIds, contractors);
+
+    const { data, error } = await supabase
+      .from("projects")
+      .insert({
+        home_id: activeHomeId,
+        user_id: userId,
+        title,
+        date,
+        notes: trimOptional(newProject.notes),
+        paints: Array.isArray(newProject.paints) ? newProject.paints : [],
+        contractor_ids: contractorIds,
+        images: Array.isArray(newProject.images) ? newProject.images : [],
+        expenses: Array.isArray(newProject.expenses) ? newProject.expenses : [],
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error adding project:", error);
+      return;
+    }
+
     updateHome(activeHomeId, (home) => ({
       ...home,
-      projects: [{ id, ...newProject }, ...home.projects],
+      projects: [mapProjectFromDb(data), ...home.projects],
     }));
     setEditingProject(null);
   }
 
-  function editProject(projectId, updates) {
+  async function editProject(projectId, updates) {
+    const userId = session?.user?.id;
+    if (!userId || !projectId) return;
+
+    const title = trimRequired(updates.title);
+    if (!title) return;
+
+    const date = isValidDateStr(updates.date)
+      ? updates.date
+      : TODAY.toISOString().split("T")[0];
+
+    const contractorIds = validateContractorIds(updates.contractorIds, contractors);
+
+    const sanitized = {
+      title,
+      date,
+      notes: trimOptional(updates.notes),
+      paints: Array.isArray(updates.paints) ? updates.paints : [],
+      contractor_ids: contractorIds,
+      images: Array.isArray(updates.images) ? updates.images : [],
+      expenses: Array.isArray(updates.expenses) ? updates.expenses : [],
+    };
+
+    const { data, error } = await supabase
+      .from("projects")
+      .update(sanitized)
+      .eq("id", projectId)
+      .eq("user_id", userId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error updating project:", error);
+      return;
+    }
+
+    const mapped = mapProjectFromDb(data);
     updateHome(activeHomeId, (home) => ({
       ...home,
-      projects: home.projects.map((p) =>
-        p.id === projectId ? { ...p, ...updates } : p
-      ),
+      projects: home.projects.map((p) => (p.id === projectId ? mapped : p)),
     }));
   }
 
-  function deleteProject(projectId) {
+  async function deleteProject(projectId) {
+    const userId = session?.user?.id;
+    if (!userId || !projectId) return;
+
+    const { error } = await supabase
+      .from("projects")
+      .delete()
+      .eq("id", projectId)
+      .eq("user_id", userId);
+
+    if (error) {
+      console.error("Error deleting project:", error);
+      return;
+    }
+
     updateHome(activeHomeId, (home) => ({
       ...home,
       projects: home.projects.filter((p) => p.id !== projectId),
@@ -639,25 +850,119 @@ export default function App({ session }) {
     );
   }
 
-  function addWarranty(newWarranty) {
-    const id = "w" + Math.random().toString(36).slice(2, 9);
+  async function addWarranty(newWarranty) {
+    const userId = session?.user?.id;
+    if (!userId || !activeHomeId) return;
+
+    const name = trimRequired(newWarranty.name);
+    if (!name) return;
+
+    const contractorId = newWarranty.contractorId || null;
+    if (contractorId && !contractors.some((c) => c.id === contractorId)) return;
+
+    const { data, error } = await supabase
+      .from("warranties")
+      .insert({
+        home_id: activeHomeId,
+        user_id: userId,
+        name,
+        manufacturer: trimOptional(newWarranty.manufacturer),
+        model: trimOptional(newWarranty.model),
+        serial_number: trimOptional(newWarranty.serialNumber),
+        purchased_from: trimOptional(newWarranty.purchasedFrom),
+        purchase_price: trimOptional(newWarranty.purchasePrice),
+        date_installed: newWarranty.dateInstalled && isValidDateStr(newWarranty.dateInstalled)
+          ? newWarranty.dateInstalled
+          : null,
+        date_expires: newWarranty.dateExpires && isValidDateStr(newWarranty.dateExpires)
+          ? newWarranty.dateExpires
+          : null,
+        provider: trimOptional(newWarranty.provider),
+        provider_contact: trimOptional(newWarranty.providerContact),
+        contractor_id: contractorId,
+        notes: trimOptional(newWarranty.notes),
+        images: Array.isArray(newWarranty.images) ? newWarranty.images : [],
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error adding warranty:", error);
+      return;
+    }
+
     updateHome(activeHomeId, (home) => ({
       ...home,
-      warranties: [...(home.warranties || []), { id, ...newWarranty }],
+      warranties: [...(home.warranties || []), mapWarrantyFromDb(data)],
     }));
     setEditingWarranty(null);
   }
 
-  function editWarranty(warrantyId, updates) {
+  async function editWarranty(warrantyId, updates) {
+    const userId = session?.user?.id;
+    if (!userId || !warrantyId) return;
+
+    const name = trimRequired(updates.name);
+    if (!name) return;
+
+    const contractorId = updates.contractorId || null;
+    if (contractorId && !contractors.some((c) => c.id === contractorId)) return;
+
+    const sanitized = {
+      name,
+      manufacturer: trimOptional(updates.manufacturer),
+      model: trimOptional(updates.model),
+      serial_number: trimOptional(updates.serialNumber),
+      purchased_from: trimOptional(updates.purchasedFrom),
+      purchase_price: trimOptional(updates.purchasePrice),
+      date_installed: updates.dateInstalled && isValidDateStr(updates.dateInstalled)
+        ? updates.dateInstalled
+        : null,
+      date_expires: updates.dateExpires && isValidDateStr(updates.dateExpires)
+        ? updates.dateExpires
+        : null,
+      provider: trimOptional(updates.provider),
+      provider_contact: trimOptional(updates.providerContact),
+      contractor_id: contractorId,
+      notes: trimOptional(updates.notes),
+      images: Array.isArray(updates.images) ? updates.images : [],
+    };
+
+    const { data, error } = await supabase
+      .from("warranties")
+      .update(sanitized)
+      .eq("id", warrantyId)
+      .eq("user_id", userId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error updating warranty:", error);
+      return;
+    }
+
+    const mapped = mapWarrantyFromDb(data);
     updateHome(activeHomeId, (home) => ({
       ...home,
-      warranties: (home.warranties || []).map((w) =>
-        w.id === warrantyId ? { ...w, ...updates } : w
-      ),
+      warranties: (home.warranties || []).map((w) => (w.id === warrantyId ? mapped : w)),
     }));
   }
 
-  function deleteWarranty(warrantyId) {
+  async function deleteWarranty(warrantyId) {
+    const userId = session?.user?.id;
+    if (!userId || !warrantyId) return;
+
+    const { error } = await supabase
+      .from("warranties")
+      .delete()
+      .eq("id", warrantyId)
+      .eq("user_id", userId);
+
+    if (error) {
+      console.error("Error deleting warranty:", error);
+      return;
+    }
+
     updateHome(activeHomeId, (home) => ({
       ...home,
       warranties: (home.warranties || []).filter((w) => w.id !== warrantyId),
@@ -790,6 +1095,30 @@ export default function App({ session }) {
     }
 
     setTaskLibrary((prev) => prev.filter((item) => item.id !== id));
+  }
+
+  if (loadingData) {
+    return (
+      <div
+        data-theme={theme}
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "var(--bg)",
+          fontFamily: "Inter, system-ui, sans-serif",
+          color: "var(--text-muted)",
+          fontSize: 14,
+        }}
+      >
+        <style>{`
+          :root { --bg: #F7F4EF; --text-muted: #888780; }
+          [data-theme="dark"] { --bg: #1C1C1A; --text-muted: #8A8780; }
+        `}</style>
+        Loading…
+      </div>
+    );
   }
 
   if (!activeHome) return (
@@ -1181,9 +1510,9 @@ export default function App({ session }) {
           task={completingTask}
           contractors={contractors}
           onClose={() => setCompletingTask(null)}
-          onSave={(completion) => {
-            completeTask(completingTask.id, completion);
-            setCompletingTask(null);
+          onSave={async (completion) => {
+            const ok = await completeTask(completingTask.id, completion);
+            if (ok) setCompletingTask(null);
           }}
         />
       )}
