@@ -26,6 +26,19 @@ import {
   History,
 } from "lucide-react";
 import { supabase } from "./supabase";
+import StorageImage from "./StorageImage";
+import {
+  uploadImage,
+  deleteStorageImage,
+  deleteStorageImages,
+  imageForDb,
+  imagesForDb,
+  expensesForDb,
+  collectImagePaths,
+  collectImagePathsFromExpenses,
+  collectImagePathsFromHome,
+  newImageId,
+} from "./imageStorage";
 
 // ============================================================================
 // HELPERS
@@ -75,8 +88,16 @@ function sortWithOtherLast(items) {
   return [...rest, ...others];
 }
 
-const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+function removedImagePaths(before, after) {
+  const afterPaths = new Set(collectImagePaths(after));
+  return collectImagePaths(before).filter((p) => !afterPaths.has(p));
+}
+
+function removedReceiptPaths(before, after) {
+  const afterPaths = new Set(collectImagePathsFromExpenses(after));
+  return collectImagePathsFromExpenses(before).filter((p) => !afterPaths.has(p));
+}
+
 const TASK_CATEGORIES = ["HVAC", "Exterior", "Safety", "Plumbing", "Appliances", "Other"];
 
 function trimRequired(value) {
@@ -115,22 +136,6 @@ function validateRating(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return 0;
   return Math.min(5, Math.max(0, Math.round(n)));
-}
-
-function readValidatedImageFile(file, onLoad) {
-  if (!file || !ALLOWED_IMAGE_TYPES.has(file.type)) {
-    console.error("Invalid image file type:", file?.type);
-    return;
-  }
-  if (file.size > MAX_IMAGE_BYTES) {
-    console.error("Image file too large (max 5 MB):", file.name);
-    return;
-  }
-  const reader = new FileReader();
-  reader.onload = () => {
-    onLoad({ src: reader.result, name: file.name });
-  };
-  reader.readAsDataURL(file);
 }
 
 function validateContractorIds(ids, contractors) {
@@ -375,9 +380,9 @@ export default function App({ session }) {
 
     const contractorIds = validateContractorIds(completion.contractorIds, contractors);
     const notes = trimOptional(completion.notes);
-    const images = Array.isArray(completion.images) ? completion.images : [];
-    const expenses = Array.isArray(completion.expenses) ? completion.expenses : [];
-    const mergedImages = [...(task.images || []), ...images];
+    const images = imagesForDb(completion.images);
+    const expenses = expensesForDb(completion.expenses);
+    const mergedImages = imagesForDb([...(task.images || []), ...(completion.images || [])]);
 
     const { data: completionRow, error: completionError } = await supabase
       .from("task_completions")
@@ -465,7 +470,7 @@ export default function App({ session }) {
         last_done: null,
         next_due: nextDueValue,
         contractor_id: contractorId,
-        images: Array.isArray(newTask.images) ? newTask.images : [],
+        images: imagesForDb(newTask.images),
       })
       .select()
       .single();
@@ -486,6 +491,15 @@ export default function App({ session }) {
     const userId = session?.user?.id;
     if (!userId || !taskId) return;
 
+    const task = activeHome?.tasks.find((t) => t.id === taskId);
+    const paths = [
+      ...collectImagePaths(task?.images),
+      ...(task?.completionHistory || []).flatMap((entry) => [
+        ...collectImagePaths(entry.images),
+        ...collectImagePathsFromExpenses(entry.expenses),
+      ]),
+    ];
+
     const { error } = await supabase
       .from("tasks")
       .delete()
@@ -496,6 +510,8 @@ export default function App({ session }) {
       console.error("Error deleting task:", error);
       return;
     }
+
+    await deleteStorageImages(paths);
 
     updateHome(activeHomeId, (home) => ({
       ...home,
@@ -526,8 +542,8 @@ export default function App({ session }) {
         notes: trimOptional(newProject.notes),
         paints: Array.isArray(newProject.paints) ? newProject.paints : [],
         contractor_ids: contractorIds,
-        images: Array.isArray(newProject.images) ? newProject.images : [],
-        expenses: Array.isArray(newProject.expenses) ? newProject.expenses : [],
+        images: imagesForDb(newProject.images),
+        expenses: expensesForDb(newProject.expenses),
       })
       .select()
       .single();
@@ -556,6 +572,7 @@ export default function App({ session }) {
       : TODAY.toISOString().split("T")[0];
 
     const contractorIds = validateContractorIds(updates.contractorIds, contractors);
+    const oldProject = activeHome?.projects.find((p) => p.id === projectId);
 
     const sanitized = {
       title,
@@ -563,8 +580,8 @@ export default function App({ session }) {
       notes: trimOptional(updates.notes),
       paints: Array.isArray(updates.paints) ? updates.paints : [],
       contractor_ids: contractorIds,
-      images: Array.isArray(updates.images) ? updates.images : [],
-      expenses: Array.isArray(updates.expenses) ? updates.expenses : [],
+      images: imagesForDb(updates.images),
+      expenses: expensesForDb(updates.expenses),
     };
 
     const { data, error } = await supabase
@@ -580,6 +597,11 @@ export default function App({ session }) {
       return;
     }
 
+    await deleteStorageImages([
+      ...removedImagePaths(oldProject?.images, updates.images),
+      ...removedReceiptPaths(oldProject?.expenses, updates.expenses),
+    ]);
+
     const mapped = mapProjectFromDb(data);
     updateHome(activeHomeId, (home) => ({
       ...home,
@@ -591,6 +613,12 @@ export default function App({ session }) {
     const userId = session?.user?.id;
     if (!userId || !projectId) return;
 
+    const project = activeHome?.projects.find((p) => p.id === projectId);
+    const paths = [
+      ...collectImagePaths(project?.images),
+      ...collectImagePathsFromExpenses(project?.expenses),
+    ];
+
     const { error } = await supabase
       .from("projects")
       .delete()
@@ -601,6 +629,8 @@ export default function App({ session }) {
       console.error("Error deleting project:", error);
       return;
     }
+
+    await deleteStorageImages(paths);
 
     updateHome(activeHomeId, (home) => ({
       ...home,
@@ -624,7 +654,7 @@ export default function App({ session }) {
         name,
         address: trimOptional(newHome.address),
         color,
-        image: newHome.image || null,
+        image: imageForDb(newHome.image),
       })
       .select()
       .single();
@@ -646,6 +676,8 @@ export default function App({ session }) {
     if (!name) return;
 
     const color = isValidHexColor(updates.color) ? updates.color : "#2F4A3E";
+    const oldHome = homes.find((h) => h.id === homeId);
+    const newImage = imageForDb(updates.image);
 
     const { error } = await supabase
       .from("homes")
@@ -653,7 +685,7 @@ export default function App({ session }) {
         name,
         address: trimOptional(updates.address),
         color,
-        image: updates.image || null,
+        image: newImage,
       })
       .eq("id", homeId)
       .eq("user_id", userId);
@@ -663,14 +695,21 @@ export default function App({ session }) {
       return;
     }
 
+    if (oldHome?.image?.path && oldHome.image.path !== newImage?.path) {
+      await deleteStorageImage(oldHome.image.path);
+    }
+
     setHomes((prev) =>
-      prev.map((h) => (h.id === homeId ? { ...h, name, address: trimOptional(updates.address), color, image: updates.image || null } : h))
+      prev.map((h) => (h.id === homeId ? { ...h, name, address: trimOptional(updates.address), color, image: newImage } : h))
     );
   }
 
   async function deleteHome(homeId) {
     const userId = session?.user?.id;
     if (!userId || !homeId) return;
+
+    const home = homes.find((h) => h.id === homeId);
+    const paths = collectImagePathsFromHome(home);
 
     const { error } = await supabase
       .from("homes")
@@ -682,6 +721,8 @@ export default function App({ session }) {
       console.error("Error deleting home:", error);
       return;
     }
+
+    await deleteStorageImages(paths);
 
     const remaining = homes.filter((h) => h.id !== homeId);
     setHomes(remaining);
@@ -717,7 +758,7 @@ export default function App({ session }) {
       insurance_expires: newContractor.insuranceExpires && isValidDateStr(newContractor.insuranceExpires)
         ? newContractor.insuranceExpires
         : null,
-      coi_image: newContractor.coiImage || null,
+      coi_image: imageForDb(newContractor.coiImage),
       rating: validateRating(newContractor.rating),
       notes: trimOptional(newContractor.notes),
     };
@@ -765,6 +806,9 @@ export default function App({ session }) {
     const trade = trimRequired(updates.trade);
     if (!trade) return;
 
+    const oldContractor = contractors.find((c) => c.id === contractorId);
+    const newCoiImage = imageForDb(updates.coiImage);
+
     const sanitized = {
       name,
       company: trimOptional(updates.company),
@@ -778,7 +822,7 @@ export default function App({ session }) {
       insurance_expires: updates.insuranceExpires && isValidDateStr(updates.insuranceExpires)
         ? updates.insuranceExpires
         : null,
-      coi_image: updates.coiImage || null,
+      coi_image: newCoiImage,
       rating: validateRating(updates.rating),
       notes: trimOptional(updates.notes),
     };
@@ -792,6 +836,10 @@ export default function App({ session }) {
     if (error) {
       console.error("Error updating contractor:", error);
       return;
+    }
+
+    if (oldContractor?.coiImage?.path && oldContractor.coiImage.path !== newCoiImage?.path) {
+      await deleteStorageImage(oldContractor.coiImage.path);
     }
 
     setContractors((prev) =>
@@ -818,6 +866,9 @@ export default function App({ session }) {
     const userId = session?.user?.id;
     if (!userId || !contractorId) return;
 
+    const contractor = contractors.find((c) => c.id === contractorId);
+    const coiPath = contractor?.coiImage?.path;
+
     const { error } = await supabase
       .from("contractors")
       .delete()
@@ -828,6 +879,8 @@ export default function App({ session }) {
       console.error("Error deleting contractor:", error);
       return;
     }
+
+    if (coiPath) await deleteStorageImage(coiPath);
 
     setContractors((prev) => prev.filter((c) => c.id !== contractorId));
     setHomes((prev) =>
@@ -881,7 +934,7 @@ export default function App({ session }) {
         provider_contact: trimOptional(newWarranty.providerContact),
         contractor_id: contractorId,
         notes: trimOptional(newWarranty.notes),
-        images: Array.isArray(newWarranty.images) ? newWarranty.images : [],
+        images: imagesForDb(newWarranty.images),
       })
       .select()
       .single();
@@ -908,6 +961,8 @@ export default function App({ session }) {
     const contractorId = updates.contractorId || null;
     if (contractorId && !contractors.some((c) => c.id === contractorId)) return;
 
+    const oldWarranty = activeHome?.warranties?.find((w) => w.id === warrantyId);
+
     const sanitized = {
       name,
       manufacturer: trimOptional(updates.manufacturer),
@@ -925,7 +980,7 @@ export default function App({ session }) {
       provider_contact: trimOptional(updates.providerContact),
       contractor_id: contractorId,
       notes: trimOptional(updates.notes),
-      images: Array.isArray(updates.images) ? updates.images : [],
+      images: imagesForDb(updates.images),
     };
 
     const { data, error } = await supabase
@@ -941,6 +996,8 @@ export default function App({ session }) {
       return;
     }
 
+    await deleteStorageImages(removedImagePaths(oldWarranty?.images, updates.images));
+
     const mapped = mapWarrantyFromDb(data);
     updateHome(activeHomeId, (home) => ({
       ...home,
@@ -952,6 +1009,9 @@ export default function App({ session }) {
     const userId = session?.user?.id;
     if (!userId || !warrantyId) return;
 
+    const warranty = activeHome?.warranties?.find((w) => w.id === warrantyId);
+    const paths = collectImagePaths(warranty?.images);
+
     const { error } = await supabase
       .from("warranties")
       .delete()
@@ -962,6 +1022,8 @@ export default function App({ session }) {
       console.error("Error deleting warranty:", error);
       return;
     }
+
+    await deleteStorageImages(paths);
 
     updateHome(activeHomeId, (home) => ({
       ...home,
@@ -1324,8 +1386,8 @@ export default function App({ session }) {
         {/* Home info strip */}
         <div style={{ marginBottom: 24, display: "flex", alignItems: "center", gap: 14 }}>
           {activeHome.image && (
-            <img
-              src={activeHome.image.src}
+            <StorageImage
+              image={activeHome.image}
               alt={activeHome.image.name}
               style={{
                 width: 56,
@@ -1844,9 +1906,9 @@ function TaskRow({ task, contractor, completedContractors, allContractors, onMar
                   {entry.images && entry.images.length > 0 && (
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
                       {entry.images.map((img) => (
-                        <img
+                        <StorageImage
                           key={img.id}
-                          src={img.src}
+                          image={img}
                           alt={img.name}
                           style={{ width: 40, height: 40, borderRadius: 6, objectFit: "cover", border: "1px solid var(--border)" }}
                         />
@@ -1989,9 +2051,9 @@ function ActivityView({ tasks, projects, contractors }) {
                     {entry.images.length > 0 && (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
                         {entry.images.map((img) => (
-                          <img
+                          <StorageImage
                             key={img.id}
-                            src={img.src}
+                            image={img}
                             alt={img.name}
                             style={{ width: 48, height: 48, borderRadius: 6, objectFit: "cover", border: "1px solid var(--subtle)" }}
                           />
@@ -2155,9 +2217,9 @@ function ProjectCard({ project, contractors, onEdit, onDelete }) {
       {project.images && project.images.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
           {project.images.map((img) => (
-            <img
+            <StorageImage
               key={img.id}
-              src={img.src}
+              image={img}
               alt={img.name}
               style={{
                 width: 64,
@@ -2191,8 +2253,8 @@ function ProjectCard({ project, contractors, onEdit, onDelete }) {
             {project.expenses.map((expense) => (
               <div key={expense.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text-secondary)" }}>
                 {expense.receipt && (
-                  <img
-                    src={expense.receipt.src}
+                  <StorageImage
+                    image={expense.receipt}
                     alt={expense.receipt.name}
                     style={{ width: 24, height: 24, borderRadius: 4, objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }}
                   />
@@ -2438,8 +2500,8 @@ function ContractorCard({ contractor, properties, workHistory, onEdit, onDelete 
         )}
         {contractor.coiImage && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
-            <img
-              src={contractor.coiImage.src}
+            <StorageImage
+              image={contractor.coiImage}
               alt={contractor.coiImage.name}
               style={{ width: 24, height: 24, borderRadius: 4, objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }}
             />
@@ -2712,19 +2774,26 @@ function ExpenseEditor({ expenses, onChange }) {
   }
 
   function updateExpense(id, field, value) {
+    if (field === "receipt") {
+      const old = expenses.find((e) => e.id === id)?.receipt;
+      if (old?.path && old.path !== value?.path) deleteStorageImage(old.path);
+    }
     onChange(expenses.map((e) => (e.id === id ? { ...e, [field]: value } : e)));
   }
 
   function removeExpense(id) {
+    const expense = expenses.find((e) => e.id === id);
+    if (expense?.receipt?.path) deleteStorageImage(expense.receipt.path);
     onChange(expenses.filter((e) => e.id !== id));
   }
 
-  function handleReceiptUpload(id, e) {
+  async function handleReceiptUpload(id, e) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
-    readValidatedImageFile(file, (image) => {
-      updateExpense(id, "receipt", image);
-    });
+    const uploaded = await uploadImage(file, "receipts");
+    if (uploaded) {
+      updateExpense(id, "receipt", { ...uploaded, preview: URL.createObjectURL(file) });
+    }
     e.target.value = "";
   }
 
@@ -2778,8 +2847,8 @@ function ExpenseEditor({ expenses, onChange }) {
 
             {expense.receipt ? (
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <img
-                  src={expense.receipt.src}
+                <StorageImage
+                  image={expense.receipt}
                   alt={expense.receipt.name}
                   style={{ width: 40, height: 40, borderRadius: 6, objectFit: "cover", border: "1px solid var(--border)" }}
                 />
@@ -2837,19 +2906,33 @@ function ExpenseEditor({ expenses, onChange }) {
 }
 
 
-function ImageUploadGrid({ images, onChange }) {
-  function handleFiles(e) {
+function ImageUploadGrid({ images, onChange, uploadFolder }) {
+  async function handleFiles(e) {
     const files = Array.from(e.target.files || []);
-    files.forEach((file) => {
-      readValidatedImageFile(file, (image) => {
-        onChange((prev) => [...prev, { id: "img" + Math.random().toString(36).slice(2, 9), ...image }]);
-      });
-    });
     e.target.value = "";
+
+    for (const file of files) {
+      const tempId = newImageId();
+      const preview = URL.createObjectURL(file);
+      onChange((prev) => [...prev, { id: tempId, name: file.name, preview, uploading: true }]);
+
+      const uploaded = await uploadImage(file, uploadFolder);
+      if (uploaded) {
+        onChange((prev) =>
+          prev.map((img) => (img.id === tempId ? { ...uploaded, preview } : img))
+        );
+      } else {
+        URL.revokeObjectURL(preview);
+        onChange((prev) => prev.filter((img) => img.id !== tempId));
+      }
+    }
   }
 
   function removeImage(id) {
-    onChange((prev) => prev.filter((img) => img.id !== id));
+    const img = images.find((i) => i.id === id);
+    if (img?.path) deleteStorageImage(img.path);
+    if (img?.preview) URL.revokeObjectURL(img.preview);
+    onChange((prev) => prev.filter((i) => i.id !== id));
   }
 
   return (
@@ -2868,7 +2951,20 @@ function ImageUploadGrid({ images, onChange }) {
               flexShrink: 0,
             }}
           >
-            <img src={img.src} alt={img.name} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+            <StorageImage
+              image={img}
+              alt={img.name}
+              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+            />
+            {img.uploading && (
+              <div style={{
+                position: "absolute", inset: 0, background: "rgba(0,0,0,0.35)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                color: "#fff", fontSize: 10,
+              }}>
+                …
+              </div>
+            )}
             <button
               onClick={() => removeImage(img.id)}
               title="Remove photo"
@@ -3069,7 +3165,7 @@ function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave
                 ))}
               </select>
               <label style={labelStyle}>Photos</label>
-              <ImageUploadGrid images={images} onChange={setImages} />
+              <ImageUploadGrid images={images} onChange={setImages} uploadFolder="tasks" />
             </>
           )}
 
@@ -3156,7 +3252,7 @@ function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave
             ))}
           </select>
           <label style={labelStyle}>Photos</label>
-          <ImageUploadGrid images={images} onChange={setImages} />
+          <ImageUploadGrid images={images} onChange={setImages} uploadFolder="tasks" />
 
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text-secondary)", marginBottom: 14, cursor: "pointer" }}>
             <input
@@ -3269,7 +3365,7 @@ function CompleteTaskModal({ task, contractors, onClose, onSave }) {
       />
 
       <label style={labelStyle}>Photos</label>
-      <ImageUploadGrid images={images} onChange={setImages} />
+      <ImageUploadGrid images={images} onChange={setImages} uploadFolder="completions" />
 
       <label style={labelStyle}>Expenses</label>
       <ExpenseEditor expenses={expenses} onChange={setExpenses} />
@@ -3406,7 +3502,7 @@ function AddProjectModal({ contractors, initial, onClose, onSave }) {
       </button>
 
       <label style={labelStyle}>Photos</label>
-      <ImageUploadGrid images={images} onChange={setImages} />
+      <ImageUploadGrid images={images} onChange={setImages} uploadFolder="projects" />
 
       <label style={labelStyle}>Expenses</label>
       <ExpenseEditor expenses={expenses} onChange={setExpenses} />
@@ -3443,11 +3539,21 @@ function AddContractorModal({ tradeOptions, initial, onClose, onSave }) {
   const [rating, setRating] = useState(initial?.rating || 0);
   const [notes, setNotes] = useState(initial?.notes || "");
 
-  function handleCoiUpload(e) {
+  async function handleCoiUpload(e) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
-    readValidatedImageFile(file, setCoiImage);
+    if (coiImage?.path) await deleteStorageImage(coiImage.path);
+    const uploaded = await uploadImage(file, "coi");
+    if (uploaded) {
+      setCoiImage({ ...uploaded, preview: URL.createObjectURL(file) });
+    }
     e.target.value = "";
+  }
+
+  function handleRemoveCoi() {
+    if (coiImage?.path) deleteStorageImage(coiImage.path);
+    if (coiImage?.preview) URL.revokeObjectURL(coiImage.preview);
+    setCoiImage(null);
   }
 
   function handleSave() {
@@ -3554,13 +3660,13 @@ function AddContractorModal({ tradeOptions, initial, onClose, onSave }) {
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
         {coiImage ? (
           <div style={{ position: "relative", width: 56, height: 56, flexShrink: 0 }}>
-            <img
-              src={coiImage.src}
+            <StorageImage
+              image={coiImage}
               alt={coiImage.name}
               style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover", border: "1px solid var(--border)", display: "block" }}
             />
             <button
-              onClick={() => setCoiImage(null)}
+              onClick={handleRemoveCoi}
               title="Remove COI"
               style={{
                 position: "absolute",
@@ -4031,8 +4137,8 @@ function PropertiesEditor({ homes, onAddHome, onEditHome, onDeleteHome }) {
               }}
             >
               {home.image ? (
-                <img
-                  src={home.image.src}
+                <StorageImage
+                  image={home.image}
                   alt={home.image.name}
                   style={{ width: 32, height: 32, borderRadius: 6, objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }}
                 />
@@ -4139,11 +4245,21 @@ function PropertyForm({ initial, onSave, onCancel, saveLabel }) {
     onSave({ name: name.trim(), address: address.trim(), color, image });
   }
 
-  function handleImageUpload(e) {
+  async function handleImageUpload(e) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
-    readValidatedImageFile(file, setImage);
+    if (image?.path) await deleteStorageImage(image.path);
+    const uploaded = await uploadImage(file, "homes");
+    if (uploaded) {
+      setImage({ ...uploaded, preview: URL.createObjectURL(file) });
+    }
     e.target.value = "";
+  }
+
+  function handleRemoveImage() {
+    if (image?.path) deleteStorageImage(image.path);
+    if (image?.preview) URL.revokeObjectURL(image.preview);
+    setImage(null);
   }
 
   return (
@@ -4192,13 +4308,13 @@ function PropertyForm({ initial, onSave, onCancel, saveLabel }) {
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
         {image ? (
           <div style={{ position: "relative", width: 56, height: 56, flexShrink: 0 }}>
-            <img
-              src={image.src}
+            <StorageImage
+              image={image}
               alt={image.name}
               style={{ width: 56, height: 56, borderRadius: 8, objectFit: "cover", border: "1px solid var(--border)", display: "block" }}
             />
             <button
-              onClick={() => setImage(null)}
+              onClick={handleRemoveImage}
               title="Remove photo"
               style={{
                 position: "absolute",
@@ -4449,9 +4565,9 @@ function WarrantyCard({ warranty, contractor, onEdit, onDelete }) {
       {warranty.images && warranty.images.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
           {warranty.images.map((img) => (
-            <img
+            <StorageImage
               key={img.id}
-              src={img.src}
+              image={img}
               alt={img.name}
               style={{
                 width: 64,
@@ -4646,7 +4762,7 @@ function AddWarrantyModal({ contractors, propertyName, initial, onClose, onSave 
       />
 
       <label style={labelStyle}>Photos</label>
-      <ImageUploadGrid images={images} onChange={setImages} />
+      <ImageUploadGrid images={images} onChange={setImages} uploadFolder="warranties" />
 
       <button style={saveButtonStyle} onClick={handleSave}>
         {initial ? "Save changes" : "Add warranty"}
