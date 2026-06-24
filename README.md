@@ -1,4 +1,6 @@
-# React + Vite
+# HomeKeeper
+
+Home maintenance, project, contractor, and warranty tracker. CI runs `lint` and `build` on every pull request to `main`.
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
