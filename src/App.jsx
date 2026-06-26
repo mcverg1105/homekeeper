@@ -39,6 +39,7 @@ import {
   collectImagePathsFromHome,
   newImageId,
 } from "./imageStorage";
+import { readFormDraft, writeFormDraft, clearFormDraft, imagesForDraft } from "./formDrafts";
 
 // ============================================================================
 // HELPERS
@@ -974,20 +975,26 @@ export default function App({ session }) {
   }
 
   async function addWarranty(newWarranty) {
-    const userId = session?.user?.id;
-    if (!userId || !activeHomeId) return;
+    if (!session?.user?.id || !activeHomeId) {
+      return { ok: false, error: "No active property selected." };
+    }
 
     const name = trimRequired(newWarranty.name);
-    if (!name) return;
+    if (!name) return { ok: false, error: "Warranty name is required." };
+
+    if (imagesStillUploading(newWarranty.images)) {
+      return { ok: false, error: "Wait for photos to finish uploading before saving." };
+    }
 
     const contractorId = newWarranty.contractorId || null;
-    if (contractorId && !contractors.some((c) => c.id === contractorId)) return;
+    if (contractorId && !contractors.some((c) => c.id === contractorId)) {
+      return { ok: false, error: "Selected contractor is no longer available." };
+    }
 
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from("warranties")
       .insert({
         home_id: activeHomeId,
-        user_id: userId,
         name,
         manufacturer: trimOptional(newWarranty.manufacturer),
         model: trimOptional(newWarranty.model),
@@ -1005,31 +1012,34 @@ export default function App({ session }) {
         contractor_id: contractorId,
         notes: trimOptional(newWarranty.notes),
         images: imagesForDb(newWarranty.images),
-      })
-      .select()
-      .single();
+      });
 
     if (error) {
       console.error("Error adding warranty:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not save warranty.") };
     }
 
-    updateHome(activeHomeId, (home) => ({
-      ...home,
-      warranties: [...(home.warranties || []), mapWarrantyFromDb(data)],
-    }));
+    await reloadActiveHomeData();
     setEditingWarranty(null);
+    return { ok: true };
   }
 
   async function editWarranty(warrantyId, updates) {
-    const userId = session?.user?.id;
-    if (!userId || !warrantyId) return;
+    if (!session?.user?.id || !warrantyId) {
+      return { ok: false, error: "Could not update warranty." };
+    }
 
     const name = trimRequired(updates.name);
-    if (!name) return;
+    if (!name) return { ok: false, error: "Warranty name is required." };
+
+    if (imagesStillUploading(updates.images)) {
+      return { ok: false, error: "Wait for photos to finish uploading before saving." };
+    }
 
     const contractorId = updates.contractorId || null;
-    if (contractorId && !contractors.some((c) => c.id === contractorId)) return;
+    if (contractorId && !contractors.some((c) => c.id === contractorId)) {
+      return { ok: false, error: "Selected contractor is no longer available." };
+    }
 
     const oldWarranty = activeHome?.warranties?.find((w) => w.id === warrantyId);
 
@@ -1053,26 +1063,21 @@ export default function App({ session }) {
       images: imagesForDb(updates.images),
     };
 
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from("warranties")
       .update(sanitized)
       .eq("id", warrantyId)
-      .eq("user_id", userId)
-      .select()
-      .single();
+      .eq("user_id", session.user.id);
 
     if (error) {
       console.error("Error updating warranty:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not update warranty.") };
     }
 
     await deleteStorageImages(removedImagePaths(oldWarranty?.images, updates.images));
 
-    const mapped = mapWarrantyFromDb(data);
-    updateHome(activeHomeId, (home) => ({
-      ...home,
-      warranties: (home.warranties || []).map((w) => (w.id === warrantyId ? mapped : w)),
-    }));
+    await reloadActiveHomeData();
+    return { ok: true };
   }
 
   async function deleteWarranty(warrantyId) {
@@ -1557,6 +1562,7 @@ export default function App({ session }) {
       {/* Modals */}
       {showAddTask && (
         <AddTaskModal
+          homeId={activeHomeId}
           contractors={contractors}
           taskLibrary={taskLibrary}
           existingTasks={activeHome.tasks}
@@ -1567,6 +1573,7 @@ export default function App({ session }) {
       )}
       {editingProject && (
         <AddProjectModal
+          homeId={activeHomeId}
           contractors={contractors}
           initial={editingProject === "new" ? null : editingProject}
           onClose={() => setEditingProject(null)}
@@ -1623,17 +1630,18 @@ export default function App({ session }) {
       )}
       {editingWarranty && (
         <AddWarrantyModal
+          homeId={activeHomeId}
           contractors={contractors}
           propertyName={activeHome.name}
           initial={editingWarranty === "new" ? null : editingWarranty}
           onClose={() => setEditingWarranty(null)}
-          onSave={(data) => {
+          onSave={async (data) => {
             if (editingWarranty === "new") {
-              addWarranty(data);
-            } else {
-              editWarranty(editingWarranty.id, data);
-              setEditingWarranty(null);
+              return addWarranty(data);
             }
+            const result = await editWarranty(editingWarranty.id, data);
+            if (result?.ok !== false) setEditingWarranty(null);
+            return result;
           }}
         />
       )}
@@ -3091,18 +3099,39 @@ function ImageUploadGrid({ images, onChange, uploadFolder }) {
 }
 
 
-function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave, onAddLibraryTask }) {
-  const [mode, setMode] = useState("library"); // 'library' | 'custom'
-  const [title, setTitle] = useState("");
-  const [category, setCategory] = useState("HVAC");
-  const [frequencyMonths, setFrequencyMonths] = useState(6);
-  const [contractorId, setContractorId] = useState("");
-  const [images, setImages] = useState([]);
-  const [libraryTaskId, setLibraryTaskId] = useState("");
+function AddTaskModal({ homeId, contractors, taskLibrary, existingTasks, onClose, onSave, onAddLibraryTask }) {
+  const draftKey = homeId ? `task:${homeId}` : null;
+
+  const [mode, setMode] = useState(() => readFormDraft(draftKey)?.mode ?? "library");
+  const [title, setTitle] = useState(() => readFormDraft(draftKey)?.title ?? "");
+  const [category, setCategory] = useState(() => readFormDraft(draftKey)?.category ?? "HVAC");
+  const [frequencyMonths, setFrequencyMonths] = useState(() => readFormDraft(draftKey)?.frequencyMonths ?? 6);
+  const [contractorId, setContractorId] = useState(() => readFormDraft(draftKey)?.contractorId ?? "");
+  const [images, setImages] = useState(() => readFormDraft(draftKey)?.images ?? []);
+  const [libraryTaskId, setLibraryTaskId] = useState(() => readFormDraft(draftKey)?.libraryTaskId ?? "");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const [nextDue, setNextDue] = useState("");
-  const [saveToLibrary, setSaveToLibrary] = useState(true);
+  const [nextDue, setNextDue] = useState(() => readFormDraft(draftKey)?.nextDue ?? "");
+  const [saveToLibrary, setSaveToLibrary] = useState(() => readFormDraft(draftKey)?.saveToLibrary ?? true);
+  const [draftRestored] = useState(() => {
+    const draft = readFormDraft(draftKey);
+    return !!(draft && (draft.title || draft.libraryTaskId || draft.nextDue || draft.contractorId));
+  });
+
+  useEffect(() => {
+    if (!draftKey) return;
+    writeFormDraft(draftKey, {
+      mode,
+      title,
+      category,
+      frequencyMonths,
+      contractorId,
+      images: imagesForDraft(images),
+      libraryTaskId,
+      nextDue,
+      saveToLibrary,
+    });
+  }, [draftKey, mode, title, category, frequencyMonths, contractorId, images, libraryTaskId, nextDue, saveToLibrary]);
 
   const sortedLibrary = [...taskLibrary].sort((a, b) => a.title.localeCompare(b.title));
   const selectedLibraryItem = taskLibrary.find((t) => t.id === libraryTaskId);
@@ -3194,11 +3223,18 @@ function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave
     setSaving(false);
     if (result?.ok === false) {
       setError(result.error || "Could not save task.");
+    } else {
+      clearFormDraft(draftKey);
     }
   }
 
   return (
     <Modal title="Add maintenance task" onClose={onClose}>
+      {draftRestored && (
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px", lineHeight: 1.5 }}>
+          Restored your unsaved draft.
+        </p>
+      )}
       {mode === "library" ? (
         <>
           {taskLibrary.length === 0 ? (
@@ -3468,16 +3504,40 @@ function CompleteTaskModal({ task, contractors, onClose, onSave }) {
 }
 
 
-function AddProjectModal({ contractors, initial, onClose, onSave }) {
-  const [title, setTitle] = useState(initial?.title || "");
-  const [date, setDate] = useState(initial?.date || TODAY.toISOString().split("T")[0]);
-  const [notes, setNotes] = useState(initial?.notes || "");
-  const [paints, setPaints] = useState(initial?.paints || []);
-  const [contractorIds, setContractorIds] = useState(initial?.contractorIds || []);
-  const [images, setImages] = useState(initial?.images || []);
-  const [expenses, setExpenses] = useState(initial?.expenses || []);
+function AddProjectModal({ homeId, contractors, initial, onClose, onSave }) {
+  const isNew = !initial;
+  const draftKey = isNew && homeId ? `project:${homeId}` : null;
+  const savedDraft = isNew ? readFormDraft(draftKey) : null;
+
+  const [title, setTitle] = useState(() => savedDraft?.title ?? initial?.title ?? "");
+  const [date, setDate] = useState(() => savedDraft?.date ?? initial?.date ?? TODAY.toISOString().split("T")[0]);
+  const [notes, setNotes] = useState(() => savedDraft?.notes ?? initial?.notes ?? "");
+  const [paints, setPaints] = useState(() => savedDraft?.paints ?? initial?.paints ?? []);
+  const [contractorIds, setContractorIds] = useState(() => savedDraft?.contractorIds ?? initial?.contractorIds ?? []);
+  const [images, setImages] = useState(() => savedDraft?.images ?? initial?.images ?? []);
+  const [expenses, setExpenses] = useState(() => savedDraft?.expenses ?? initial?.expenses ?? []);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [draftRestored] = useState(() => {
+    if (!savedDraft) return false;
+    return !!(savedDraft.title || savedDraft.notes || savedDraft.paints?.length || savedDraft.contractorIds?.length);
+  });
+
+  useEffect(() => {
+    if (!draftKey) return;
+    writeFormDraft(draftKey, {
+      title,
+      date,
+      notes,
+      paints,
+      contractorIds,
+      images: imagesForDraft(images),
+      expenses: expenses.map((e) => ({
+        ...e,
+        receipt: e.receipt ? imagesForDraft([e.receipt])[0] ?? null : null,
+      })),
+    });
+  }, [draftKey, title, date, notes, paints, contractorIds, images, expenses]);
 
   function addPaintRow() {
     setPaints([...paints, { name: "", hex: "#CCCCCC", location: "" }]);
@@ -3514,11 +3574,18 @@ function AddProjectModal({ contractors, initial, onClose, onSave }) {
 
     if (result?.ok === false) {
       setError(result.error || "Could not save project.");
+    } else {
+      clearFormDraft(draftKey);
     }
   }
 
   return (
     <Modal title={initial ? "Edit project" : "Log a project"} onClose={onClose}>
+      {draftRestored && (
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px", lineHeight: 1.5 }}>
+          Restored your unsaved draft.
+        </p>
+      )}
       <label style={labelStyle}>Project title</label>
       <input
         style={inputStyle}
@@ -4700,24 +4767,83 @@ function WarrantyCard({ warranty, contractor, onEdit, onDelete }) {
 // ADD/EDIT WARRANTY MODAL
 // ============================================================================
 
-function AddWarrantyModal({ contractors, propertyName, initial, onClose, onSave }) {
-  const [name, setName] = useState(initial?.name || "");
-  const [manufacturer, setManufacturer] = useState(initial?.manufacturer || "");
-  const [model, setModel] = useState(initial?.model || "");
-  const [serialNumber, setSerialNumber] = useState(initial?.serialNumber || "");
-  const [purchasedFrom, setPurchasedFrom] = useState(initial?.purchasedFrom || "");
-  const [purchasePrice, setPurchasePrice] = useState(initial?.purchasePrice || "");
-  const [dateInstalled, setDateInstalled] = useState(initial?.dateInstalled || "");
-  const [dateExpires, setDateExpires] = useState(initial?.dateExpires || "");
-  const [provider, setProvider] = useState(initial?.provider || "");
-  const [providerContact, setProviderContact] = useState(initial?.providerContact || "");
-  const [contractorId, setContractorId] = useState(initial?.contractorId || "");
-  const [notes, setNotes] = useState(initial?.notes || "");
-  const [images, setImages] = useState(initial?.images || []);
+function AddWarrantyModal({ homeId, contractors, propertyName, initial, onClose, onSave }) {
+  const isNew = !initial;
+  const draftKey = isNew && homeId ? `warranty:${homeId}` : null;
+  const savedDraft = isNew ? readFormDraft(draftKey) : null;
 
-  function handleSave() {
+  const [name, setName] = useState(() => savedDraft?.name ?? initial?.name ?? "");
+  const [manufacturer, setManufacturer] = useState(() => savedDraft?.manufacturer ?? initial?.manufacturer ?? "");
+  const [model, setModel] = useState(() => savedDraft?.model ?? initial?.model ?? "");
+  const [serialNumber, setSerialNumber] = useState(() => savedDraft?.serialNumber ?? initial?.serialNumber ?? "");
+  const [purchasedFrom, setPurchasedFrom] = useState(() => savedDraft?.purchasedFrom ?? initial?.purchasedFrom ?? "");
+  const [purchasePrice, setPurchasePrice] = useState(() => savedDraft?.purchasePrice ?? initial?.purchasePrice ?? "");
+  const [dateInstalled, setDateInstalled] = useState(() => savedDraft?.dateInstalled ?? initial?.dateInstalled ?? "");
+  const [dateExpires, setDateExpires] = useState(() => savedDraft?.dateExpires ?? initial?.dateExpires ?? "");
+  const [provider, setProvider] = useState(() => savedDraft?.provider ?? initial?.provider ?? "");
+  const [providerContact, setProviderContact] = useState(() => savedDraft?.providerContact ?? initial?.providerContact ?? "");
+  const [contractorId, setContractorId] = useState(() => savedDraft?.contractorId ?? initial?.contractorId ?? "");
+  const [notes, setNotes] = useState(() => savedDraft?.notes ?? initial?.notes ?? "");
+  const [images, setImages] = useState(() => savedDraft?.images ?? initial?.images ?? []);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [draftRestored] = useState(() => {
+    if (!savedDraft) return false;
+    return !!(
+      savedDraft.name ||
+      savedDraft.manufacturer ||
+      savedDraft.model ||
+      savedDraft.serialNumber ||
+      savedDraft.notes ||
+      savedDraft.provider
+    );
+  });
+
+  useEffect(() => {
+    if (!draftKey) return;
+    writeFormDraft(draftKey, {
+      name,
+      manufacturer,
+      model,
+      serialNumber,
+      purchasedFrom,
+      purchasePrice,
+      dateInstalled,
+      dateExpires,
+      provider,
+      providerContact,
+      contractorId,
+      notes,
+      images: imagesForDraft(images),
+    });
+  }, [
+    draftKey,
+    name,
+    manufacturer,
+    model,
+    serialNumber,
+    purchasedFrom,
+    purchasePrice,
+    dateInstalled,
+    dateExpires,
+    provider,
+    providerContact,
+    contractorId,
+    notes,
+    images,
+  ]);
+
+  async function handleSave() {
     if (!name.trim()) return;
-    onSave({
+    setError("");
+
+    if (imagesStillUploading(images)) {
+      setError("Wait for photos to finish uploading before saving.");
+      return;
+    }
+
+    setSaving(true);
+    const result = await onSave({
       name: name.trim(),
       manufacturer: manufacturer.trim(),
       model: model.trim(),
@@ -4732,10 +4858,22 @@ function AddWarrantyModal({ contractors, propertyName, initial, onClose, onSave 
       notes: notes.trim(),
       images,
     });
+    setSaving(false);
+
+    if (result?.ok === false) {
+      setError(result.error || "Could not save warranty.");
+    } else {
+      clearFormDraft(draftKey);
+    }
   }
 
   return (
     <Modal title={initial ? "Edit warranty" : "Add warranty"} onClose={onClose}>
+      {draftRestored && (
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px", lineHeight: 1.5 }}>
+          Restored your unsaved draft.
+        </p>
+      )}
       {propertyName && (
         <div
           style={{
@@ -4875,8 +5013,14 @@ function AddWarrantyModal({ contractors, propertyName, initial, onClose, onSave 
       <label style={labelStyle}>Photos</label>
       <ImageUploadGrid images={images} onChange={setImages} uploadFolder="warranties" />
 
-      <button style={saveButtonStyle} onClick={handleSave}>
-        {initial ? "Save changes" : "Add warranty"}
+      {error && (
+        <p style={{ fontSize: 12, color: "#A32D2D", margin: "0 0 14px" }}>
+          {error}
+        </p>
+      )}
+
+      <button style={saveButtonStyle} onClick={handleSave} disabled={saving}>
+        {saving ? "Saving..." : initial ? "Save changes" : "Add warranty"}
       </button>
     </Modal>
   );
