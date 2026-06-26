@@ -138,6 +138,15 @@ function validateRating(value) {
   return Math.min(5, Math.max(0, Math.round(n)));
 }
 
+function imagesStillUploading(images) {
+  if (!Array.isArray(images)) return false;
+  return images.some((img) => img.uploading || (!img.path && !img.src && img.preview));
+}
+
+function saveErrorMessage(error, fallback) {
+  return error?.message || fallback;
+}
+
 function validateContractorIds(ids, contractors) {
   if (!Array.isArray(ids)) return [];
   return ids.filter((id) => contractors.some((c) => c.id === id));
@@ -341,16 +350,71 @@ export default function App({ session }) {
         }
       }
 
-      updateHome(activeHomeId, (home) => ({
-        ...home,
-        tasks: (tasksData || []).map((t) => mapTaskFromDb(t, completionsByTask[t.id] || [])),
-        projects: (projectsData || []).map(mapProjectFromDb),
-        warranties: (warrantiesData || []).map(mapWarrantyFromDb),
-      }));
+      setHomes((prev) =>
+        prev.map((h) => (h.id === activeHomeId ? {
+          ...h,
+          tasks: (tasksData || []).map((t) => mapTaskFromDb(t, completionsByTask[t.id] || [])),
+          projects: (projectsData || []).map(mapProjectFromDb),
+          warranties: (warrantiesData || []).map(mapWarrantyFromDb),
+        } : h))
+      );
     }
 
     loadHomeData();
   }, [session, activeHomeId]);
+
+  async function reloadActiveHomeData() {
+    if (!session || !activeHomeId) return;
+
+    const { data: tasksData, error: tasksError } = await supabase
+      .from("tasks")
+      .select("*")
+      .eq("home_id", activeHomeId)
+      .order("next_due");
+
+    const { data: projectsData, error: projectsError } = await supabase
+      .from("projects")
+      .select("*")
+      .eq("home_id", activeHomeId)
+      .order("date", { ascending: false });
+
+    const { data: warrantiesData, error: warrantiesError } = await supabase
+      .from("warranties")
+      .select("*")
+      .eq("home_id", activeHomeId)
+      .order("date_expires");
+
+    if (tasksError) console.error("Error loading tasks:", tasksError);
+    if (projectsError) console.error("Error loading projects:", projectsError);
+    if (warrantiesError) console.error("Error loading warranties:", warrantiesError);
+
+    let completionsByTask = {};
+    if (tasksData && tasksData.length > 0) {
+      const taskIds = tasksData.map((t) => t.id);
+      const { data: completionsData, error: completionsError } = await supabase
+        .from("task_completions")
+        .select("*")
+        .in("task_id", taskIds)
+        .order("date_completed", { ascending: false });
+
+      if (completionsError) console.error("Error loading task completions:", completionsError);
+      if (completionsData) {
+        for (const row of completionsData) {
+          if (!completionsByTask[row.task_id]) completionsByTask[row.task_id] = [];
+          completionsByTask[row.task_id].push(mapCompletionFromDb(row));
+        }
+      }
+    }
+
+    setHomes((prev) =>
+      prev.map((h) => (h.id === activeHomeId ? {
+        ...h,
+        tasks: (tasksData || []).map((t) => mapTaskFromDb(t, completionsByTask[t.id] || [])),
+        projects: (projectsData || []).map(mapProjectFromDb),
+        warranties: (warrantiesData || []).map(mapWarrantyFromDb),
+      } : h))
+    );
+  }
 
   const activeHome = homes.find((h) => h.id === activeHomeId);
 
@@ -439,31 +503,41 @@ export default function App({ session }) {
   }
 
   async function addTask(newTask) {
-    const userId = session?.user?.id;
-    if (!userId || !activeHomeId) return;
+    if (!session?.user?.id || !activeHomeId) {
+      return { ok: false, error: "No active property selected." };
+    }
 
     const title = trimRequired(newTask.title);
-    if (!title) return;
+    if (!title) return { ok: false, error: "Task title is required." };
 
     const category = validateTaskCategory(newTask.category);
-    if (!category) return;
+    if (!category) {
+      return { ok: false, error: `Invalid category "${newTask.category}". Use a standard maintenance category.` };
+    }
 
     const frequencyMonths = validateFrequencyMonths(newTask.frequencyMonths);
-    if (frequencyMonths === null) return;
+    if (frequencyMonths === null) {
+      return { ok: false, error: "Repeat interval must be between 1 and 120 months." };
+    }
 
     const contractorId = newTask.contractorId || null;
-    if (contractorId && !contractors.some((c) => c.id === contractorId)) return;
+    if (contractorId && !contractors.some((c) => c.id === contractorId)) {
+      return { ok: false, error: "Selected contractor is no longer available." };
+    }
+
+    if (imagesStillUploading(newTask.images)) {
+      return { ok: false, error: "Wait for photos to finish uploading before saving." };
+    }
 
     const nextDueValue = newTask.nextDue
       ? (isValidDateStr(newTask.nextDue) ? newTask.nextDue : null)
       : addMonths(TODAY.toISOString().split("T")[0], frequencyMonths);
-    if (!nextDueValue) return;
+    if (!nextDueValue) return { ok: false, error: "Enter a valid first due date." };
 
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from("tasks")
       .insert({
         home_id: activeHomeId,
-        user_id: userId,
         title,
         category,
         frequency_months: frequencyMonths,
@@ -471,20 +545,16 @@ export default function App({ session }) {
         next_due: nextDueValue,
         contractor_id: contractorId,
         images: imagesForDb(newTask.images),
-      })
-      .select()
-      .single();
+      });
 
     if (error) {
       console.error("Error adding task:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not save task.") };
     }
 
-    updateHome(activeHomeId, (home) => ({
-      ...home,
-      tasks: [...home.tasks, mapTaskFromDb(data)],
-    }));
+    await reloadActiveHomeData();
     setShowAddTask(false);
+    return { ok: true };
   }
 
   async function deleteTask(taskId) {
@@ -520,11 +590,16 @@ export default function App({ session }) {
   }
 
   async function addProject(newProject) {
-    const userId = session?.user?.id;
-    if (!userId || !activeHomeId) return;
+    if (!session?.user?.id || !activeHomeId) {
+      return { ok: false, error: "No active property selected." };
+    }
 
     const title = trimRequired(newProject.title);
-    if (!title) return;
+    if (!title) return { ok: false, error: "Project title is required." };
+
+    if (imagesStillUploading(newProject.images)) {
+      return { ok: false, error: "Wait for photos to finish uploading before saving." };
+    }
 
     const date = isValidDateStr(newProject.date)
       ? newProject.date
@@ -532,11 +607,10 @@ export default function App({ session }) {
 
     const contractorIds = validateContractorIds(newProject.contractorIds, contractors);
 
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from("projects")
       .insert({
         home_id: activeHomeId,
-        user_id: userId,
         title,
         date,
         notes: trimOptional(newProject.notes),
@@ -544,28 +618,29 @@ export default function App({ session }) {
         contractor_ids: contractorIds,
         images: imagesForDb(newProject.images),
         expenses: expensesForDb(newProject.expenses),
-      })
-      .select()
-      .single();
+      });
 
     if (error) {
       console.error("Error adding project:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not save project.") };
     }
 
-    updateHome(activeHomeId, (home) => ({
-      ...home,
-      projects: [mapProjectFromDb(data), ...home.projects],
-    }));
+    await reloadActiveHomeData();
     setEditingProject(null);
+    return { ok: true };
   }
 
   async function editProject(projectId, updates) {
-    const userId = session?.user?.id;
-    if (!userId || !projectId) return;
+    if (!session?.user?.id || !projectId) {
+      return { ok: false, error: "Could not update project." };
+    }
 
     const title = trimRequired(updates.title);
-    if (!title) return;
+    if (!title) return { ok: false, error: "Project title is required." };
+
+    if (imagesStillUploading(updates.images)) {
+      return { ok: false, error: "Wait for photos to finish uploading before saving." };
+    }
 
     const date = isValidDateStr(updates.date)
       ? updates.date
@@ -584,17 +659,15 @@ export default function App({ session }) {
       expenses: expensesForDb(updates.expenses),
     };
 
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from("projects")
       .update(sanitized)
       .eq("id", projectId)
-      .eq("user_id", userId)
-      .select()
-      .single();
+      .eq("user_id", session.user.id);
 
     if (error) {
       console.error("Error updating project:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not update project.") };
     }
 
     await deleteStorageImages([
@@ -602,11 +675,8 @@ export default function App({ session }) {
       ...removedReceiptPaths(oldProject?.expenses, updates.expenses),
     ]);
 
-    const mapped = mapProjectFromDb(data);
-    updateHome(activeHomeId, (home) => ({
-      ...home,
-      projects: home.projects.map((p) => (p.id === projectId ? mapped : p)),
-    }));
+    await reloadActiveHomeData();
+    return { ok: true };
   }
 
   async function deleteProject(projectId) {
@@ -1500,13 +1570,13 @@ export default function App({ session }) {
           contractors={contractors}
           initial={editingProject === "new" ? null : editingProject}
           onClose={() => setEditingProject(null)}
-          onSave={(data) => {
+          onSave={async (data) => {
             if (editingProject === "new") {
-              addProject(data);
-            } else {
-              editProject(editingProject.id, data);
-              setEditingProject(null);
+              return addProject(data);
             }
+            const result = await editProject(editingProject.id, data);
+            if (result?.ok !== false) setEditingProject(null);
+            return result;
           }}
         />
       )}
@@ -3030,6 +3100,7 @@ function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave
   const [images, setImages] = useState([]);
   const [libraryTaskId, setLibraryTaskId] = useState("");
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
   const [nextDue, setNextDue] = useState("");
   const [saveToLibrary, setSaveToLibrary] = useState(true);
 
@@ -3054,17 +3125,29 @@ function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave
     );
   }
 
-  function handleSave() {
+  async function handleSave() {
+    setError("");
+
+    if (imagesStillUploading(images)) {
+      setError("Wait for photos to finish uploading before saving.");
+      return;
+    }
+
+    setSaving(true);
+    let result;
+
     if (mode === "library") {
       if (!selectedLibraryItem) {
         setError("Choose a task from the library, or switch to adding a custom task.");
+        setSaving(false);
         return;
       }
       if (checkDuplicate(selectedLibraryItem.title)) {
         setError(`"${selectedLibraryItem.title}" is already on this property's maintenance list.`);
+        setSaving(false);
         return;
       }
-      onSave({
+      result = await onSave({
         title: selectedLibraryItem.title.trim(),
         category: selectedLibraryItem.category,
         frequencyMonths: Number(selectedLibraryItem.frequencyMonths),
@@ -3072,39 +3155,46 @@ function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave
         images,
         nextDue: nextDue || null,
       });
-      return;
-    }
-
-    // Custom mode
-    const trimmed = title.trim();
-    if (!trimmed) return;
-
-    if (checkDuplicate(trimmed)) {
-      setError(`"${trimmed}" is already on this property's maintenance list.`);
-      return;
-    }
-
-    if (saveToLibrary && onAddLibraryTask) {
-      const alreadyInLibrary = taskLibrary.some(
-        (t) => t.title.trim().toLowerCase() === trimmed.toLowerCase()
-      );
-      if (!alreadyInLibrary) {
-        onAddLibraryTask({
-          title: trimmed,
-          category,
-          frequencyMonths: Number(frequencyMonths),
-        });
+    } else {
+      const trimmed = title.trim();
+      if (!trimmed) {
+        setSaving(false);
+        return;
       }
+
+      if (checkDuplicate(trimmed)) {
+        setError(`"${trimmed}" is already on this property's maintenance list.`);
+        setSaving(false);
+        return;
+      }
+
+      if (saveToLibrary && onAddLibraryTask) {
+        const alreadyInLibrary = taskLibrary.some(
+          (t) => t.title.trim().toLowerCase() === trimmed.toLowerCase()
+        );
+        if (!alreadyInLibrary) {
+          onAddLibraryTask({
+            title: trimmed,
+            category,
+            frequencyMonths: Number(frequencyMonths),
+          });
+        }
+      }
+
+      result = await onSave({
+        title: trimmed,
+        category,
+        frequencyMonths: Number(frequencyMonths),
+        contractorId: contractorId || null,
+        images,
+        nextDue: nextDue || null,
+      });
     }
 
-    onSave({
-      title: trimmed,
-      category,
-      frequencyMonths: Number(frequencyMonths),
-      contractorId: contractorId || null,
-      images,
-      nextDue: nextDue || null,
-    });
+    setSaving(false);
+    if (result?.ok === false) {
+      setError(result.error || "Could not save task.");
+    }
   }
 
   return (
@@ -3169,8 +3259,8 @@ function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave
             </>
           )}
 
-          <button style={saveButtonStyle} onClick={handleSave}>
-            Add task
+          <button style={saveButtonStyle} onClick={handleSave} disabled={saving}>
+            {saving ? "Saving..." : "Add task"}
           </button>
 
           {!selectedLibraryItem && (
@@ -3264,8 +3354,8 @@ function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave
             Save this as a reusable task in the task library
           </label>
 
-          <button style={saveButtonStyle} onClick={handleSave}>
-            Add task
+          <button style={saveButtonStyle} onClick={handleSave} disabled={saving}>
+            {saving ? "Saving..." : "Add task"}
           </button>
 
           {taskLibrary.length > 0 && (
@@ -3386,6 +3476,8 @@ function AddProjectModal({ contractors, initial, onClose, onSave }) {
   const [contractorIds, setContractorIds] = useState(initial?.contractorIds || []);
   const [images, setImages] = useState(initial?.images || []);
   const [expenses, setExpenses] = useState(initial?.expenses || []);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   function addPaintRow() {
     setPaints([...paints, { name: "", hex: "#CCCCCC", location: "" }]);
@@ -3399,9 +3491,17 @@ function AddProjectModal({ contractors, initial, onClose, onSave }) {
     setPaints(paints.filter((_, i) => i !== index));
   }
 
-  function handleSave() {
+  async function handleSave() {
     if (!title.trim()) return;
-    onSave({
+    setError("");
+
+    if (imagesStillUploading(images)) {
+      setError("Wait for photos to finish uploading before saving.");
+      return;
+    }
+
+    setSaving(true);
+    const result = await onSave({
       title: title.trim(),
       date,
       notes: notes.trim(),
@@ -3410,6 +3510,11 @@ function AddProjectModal({ contractors, initial, onClose, onSave }) {
       images,
       expenses,
     });
+    setSaving(false);
+
+    if (result?.ok === false) {
+      setError(result.error || "Could not save project.");
+    }
   }
 
   return (
@@ -3507,8 +3612,14 @@ function AddProjectModal({ contractors, initial, onClose, onSave }) {
       <label style={labelStyle}>Expenses</label>
       <ExpenseEditor expenses={expenses} onChange={setExpenses} />
 
-      <button style={saveButtonStyle} onClick={handleSave}>
-        {initial ? "Save changes" : "Save project"}
+      {error && (
+        <p style={{ fontSize: 12, color: "#A32D2D", margin: "0 0 14px" }}>
+          {error}
+        </p>
+      )}
+
+      <button style={saveButtonStyle} onClick={handleSave} disabled={saving}>
+        {saving ? "Saving..." : initial ? "Save changes" : "Save project"}
       </button>
     </Modal>
   );
