@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { supabase } from "./supabase";
 import StorageImage from "./StorageImage";
+import StorageDocument from "./StorageDocument";
 import {
   uploadImage,
   deleteStorageImage,
@@ -38,8 +39,15 @@ import {
   collectImagePathsFromExpenses,
   collectImagePathsFromHome,
   newImageId,
+  imageUploadErrorMessage,
 } from "./imageStorage";
-import { readFormDraft, writeFormDraft, clearFormDraft, imagesForDraft } from "./formDrafts";
+import {
+  uploadDocument,
+  deleteStorageDocuments,
+  documentsForDb,
+  newDocumentId,
+} from "./documentStorage";
+import { readFormDraft, writeFormDraft, clearFormDraft, imagesForDraft, documentsForDraft } from "./formDrafts";
 
 // ============================================================================
 // HELPERS
@@ -139,9 +147,13 @@ function validateRating(value) {
   return Math.min(5, Math.max(0, Math.round(n)));
 }
 
+function filesStillUploading(files) {
+  if (!Array.isArray(files)) return false;
+  return files.some((file) => file.uploading || (!file.path && !file.src));
+}
+
 function imagesStillUploading(images) {
-  if (!Array.isArray(images)) return false;
-  return images.some((img) => img.uploading || (!img.path && !img.src && img.preview));
+  return filesStillUploading(images);
 }
 
 function saveErrorMessage(error, fallback) {
@@ -175,6 +187,7 @@ function mapTaskFromDb(row, completionHistory = []) {
     contractorId: row.contractor_id,
     notes: row.notes,
     images: row.images || [],
+    documents: row.documents || [],
     completionNotes: row.completion_notes,
     completionExpenses: row.completion_expenses || [],
     completionHistory,
@@ -190,6 +203,7 @@ function mapProjectFromDb(row) {
     paints: row.paints || [],
     contractorIds: row.contractor_ids || [],
     images: row.images || [],
+    documents: row.documents || [],
     expenses: row.expenses || [],
   };
 }
@@ -210,6 +224,7 @@ function mapWarrantyFromDb(row) {
     contractorId: row.contractor_id,
     notes: row.notes,
     images: row.images || [],
+    documents: row.documents || [],
   };
 }
 
@@ -526,8 +541,8 @@ export default function App({ session }) {
       return { ok: false, error: "Selected contractor is no longer available." };
     }
 
-    if (imagesStillUploading(newTask.images)) {
-      return { ok: false, error: "Wait for photos to finish uploading before saving." };
+    if (imagesStillUploading(newTask.images) || filesStillUploading(newTask.documents)) {
+      return { ok: false, error: "Wait for files to finish uploading before saving." };
     }
 
     const nextDueValue = newTask.nextDue
@@ -546,6 +561,7 @@ export default function App({ session }) {
         next_due: nextDueValue,
         contractor_id: contractorId,
         images: imagesForDb(newTask.images),
+        documents: documentsForDb(newTask.documents),
       });
 
     if (error) {
@@ -565,6 +581,7 @@ export default function App({ session }) {
     const task = activeHome?.tasks.find((t) => t.id === taskId);
     const paths = [
       ...collectImagePaths(task?.images),
+      ...collectImagePaths(task?.documents),
       ...(task?.completionHistory || []).flatMap((entry) => [
         ...collectImagePaths(entry.images),
         ...collectImagePathsFromExpenses(entry.expenses),
@@ -598,8 +615,8 @@ export default function App({ session }) {
     const title = trimRequired(newProject.title);
     if (!title) return { ok: false, error: "Project title is required." };
 
-    if (imagesStillUploading(newProject.images)) {
-      return { ok: false, error: "Wait for photos to finish uploading before saving." };
+    if (imagesStillUploading(newProject.images) || filesStillUploading(newProject.documents)) {
+      return { ok: false, error: "Wait for files to finish uploading before saving." };
     }
 
     const date = isValidDateStr(newProject.date)
@@ -618,6 +635,7 @@ export default function App({ session }) {
         paints: Array.isArray(newProject.paints) ? newProject.paints : [],
         contractor_ids: contractorIds,
         images: imagesForDb(newProject.images),
+        documents: documentsForDb(newProject.documents),
         expenses: expensesForDb(newProject.expenses),
       });
 
@@ -639,8 +657,8 @@ export default function App({ session }) {
     const title = trimRequired(updates.title);
     if (!title) return { ok: false, error: "Project title is required." };
 
-    if (imagesStillUploading(updates.images)) {
-      return { ok: false, error: "Wait for photos to finish uploading before saving." };
+    if (imagesStillUploading(updates.images) || filesStillUploading(updates.documents)) {
+      return { ok: false, error: "Wait for files to finish uploading before saving." };
     }
 
     const date = isValidDateStr(updates.date)
@@ -657,6 +675,7 @@ export default function App({ session }) {
       paints: Array.isArray(updates.paints) ? updates.paints : [],
       contractor_ids: contractorIds,
       images: imagesForDb(updates.images),
+      documents: documentsForDb(updates.documents),
       expenses: expensesForDb(updates.expenses),
     };
 
@@ -673,6 +692,7 @@ export default function App({ session }) {
 
     await deleteStorageImages([
       ...removedImagePaths(oldProject?.images, updates.images),
+      ...removedImagePaths(oldProject?.documents, updates.documents),
       ...removedReceiptPaths(oldProject?.expenses, updates.expenses),
     ]);
 
@@ -687,6 +707,7 @@ export default function App({ session }) {
     const project = activeHome?.projects.find((p) => p.id === projectId);
     const paths = [
       ...collectImagePaths(project?.images),
+      ...collectImagePaths(project?.documents),
       ...collectImagePathsFromExpenses(project?.expenses),
     ];
 
@@ -982,8 +1003,8 @@ export default function App({ session }) {
     const name = trimRequired(newWarranty.name);
     if (!name) return { ok: false, error: "Warranty name is required." };
 
-    if (imagesStillUploading(newWarranty.images)) {
-      return { ok: false, error: "Wait for photos to finish uploading before saving." };
+    if (imagesStillUploading(newWarranty.images) || filesStillUploading(newWarranty.documents)) {
+      return { ok: false, error: "Wait for files to finish uploading before saving." };
     }
 
     const contractorId = newWarranty.contractorId || null;
@@ -1012,6 +1033,7 @@ export default function App({ session }) {
         contractor_id: contractorId,
         notes: trimOptional(newWarranty.notes),
         images: imagesForDb(newWarranty.images),
+        documents: documentsForDb(newWarranty.documents),
       });
 
     if (error) {
@@ -1032,8 +1054,8 @@ export default function App({ session }) {
     const name = trimRequired(updates.name);
     if (!name) return { ok: false, error: "Warranty name is required." };
 
-    if (imagesStillUploading(updates.images)) {
-      return { ok: false, error: "Wait for photos to finish uploading before saving." };
+    if (imagesStillUploading(updates.images) || filesStillUploading(updates.documents)) {
+      return { ok: false, error: "Wait for files to finish uploading before saving." };
     }
 
     const contractorId = updates.contractorId || null;
@@ -1061,6 +1083,7 @@ export default function App({ session }) {
       contractor_id: contractorId,
       notes: trimOptional(updates.notes),
       images: imagesForDb(updates.images),
+      documents: documentsForDb(updates.documents),
     };
 
     const { error } = await supabase
@@ -1074,7 +1097,10 @@ export default function App({ session }) {
       return { ok: false, error: saveErrorMessage(error, "Could not update warranty.") };
     }
 
-    await deleteStorageImages(removedImagePaths(oldWarranty?.images, updates.images));
+    await deleteStorageImages([
+      ...removedImagePaths(oldWarranty?.images, updates.images),
+      ...removedImagePaths(oldWarranty?.documents, updates.documents),
+    ]);
 
     await reloadActiveHomeData();
     return { ok: true };
@@ -1085,7 +1111,10 @@ export default function App({ session }) {
     if (!userId || !warrantyId) return;
 
     const warranty = activeHome?.warranties?.find((w) => w.id === warrantyId);
-    const paths = collectImagePaths(warranty?.images);
+    const paths = [
+      ...collectImagePaths(warranty?.images),
+      ...collectImagePaths(warranty?.documents),
+    ];
 
     const { error } = await supabase
       .from("warranties")
@@ -1816,6 +1845,12 @@ function TaskRow({ task, contractor, completedContractors, allContractors, onMar
                 {task.images.length}
               </span>
             )}
+            {task.documents && task.documents.length > 0 && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11, fontWeight: 400, color: "var(--text-muted)" }}>
+                <FileText size={12} />
+                {task.documents.length}
+              </span>
+            )}
           </div>
           {history.length > 0 && (
             <button
@@ -1955,6 +1990,7 @@ function TaskRow({ task, contractor, completedContractors, allContractors, onMar
           <StatusIcon size={13} />
           {dueText}
         </div>
+        <DocumentListDisplay documents={task.documents} />
       </div>
       {expanded && history.length > 0 && (
         <div style={{ padding: "0 18px 14px 40px" }}>
@@ -2311,6 +2347,7 @@ function ProjectCard({ project, contractors, onEdit, onDelete }) {
           ))}
         </div>
       )}
+      <DocumentListDisplay documents={project.documents} />
       {project.expenses && project.expenses.length > 0 && (
         <div
           style={{
@@ -2869,7 +2906,7 @@ function ExpenseEditor({ expenses, onChange }) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
     const uploaded = await uploadImage(file, "receipts");
-    if (uploaded) {
+    if (uploaded?.path) {
       updateExpense(id, "receipt", { ...uploaded, preview: URL.createObjectURL(file) });
     }
     e.target.value = "";
@@ -2985,6 +3022,9 @@ function ExpenseEditor({ expenses, onChange }) {
 
 
 function ImageUploadGrid({ images, onChange, uploadFolder }) {
+  const [uploadError, setUploadError] = useState("");
+  const [uploadNotice, setUploadNotice] = useState("");
+
   async function handleFiles(e) {
     const files = Array.from(e.target.files || []);
     e.target.value = "";
@@ -2992,16 +3032,22 @@ function ImageUploadGrid({ images, onChange, uploadFolder }) {
     for (const file of files) {
       const tempId = newImageId();
       const preview = URL.createObjectURL(file);
+      setUploadError("");
+      setUploadNotice("");
       onChange((prev) => [...prev, { id: tempId, name: file.name, preview, uploading: true }]);
 
       const uploaded = await uploadImage(file, uploadFolder);
-      if (uploaded) {
+      if (uploaded?.path) {
         onChange((prev) =>
           prev.map((img) => (img.id === tempId ? { ...uploaded, preview } : img))
         );
+        if (uploaded.compressed) {
+          setUploadNotice("Large photo was resized automatically to fit the 5 MB limit.");
+        }
       } else {
         URL.revokeObjectURL(preview);
         onChange((prev) => prev.filter((img) => img.id !== tempId));
+        setUploadError(uploaded?.error || imageUploadErrorMessage(file, null));
       }
     }
   }
@@ -3087,13 +3133,147 @@ function ImageUploadGrid({ images, onChange, uploadFolder }) {
           Add
           <input
             type="file"
-            accept="image/jpeg,image/png,image/webp"
+            accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif"
             multiple
             onChange={handleFiles}
             style={{ display: "none" }}
           />
         </label>
       </div>
+      {uploadNotice && (
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "8px 0 0" }}>
+          {uploadNotice}
+        </p>
+      )}
+      {uploadError && (
+        <p style={{ fontSize: 12, color: "#A32D2D", margin: uploadNotice ? "4px 0 0" : "8px 0 0" }}>
+          {uploadError}
+        </p>
+      )}
+    </div>
+  );
+}
+
+
+function DocumentUploadList({ documents, onChange, uploadFolder }) {
+  async function handleFiles(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+
+    for (const file of files) {
+      const tempId = newDocumentId();
+      onChange((prev) => [...prev, { id: tempId, name: file.name, mimeType: file.type, uploading: true }]);
+
+      const uploaded = await uploadDocument(file, uploadFolder);
+      if (uploaded) {
+        onChange((prev) => prev.map((doc) => (doc.id === tempId ? uploaded : doc)));
+      } else {
+        onChange((prev) => prev.filter((doc) => doc.id !== tempId));
+      }
+    }
+  }
+
+  function removeDocument(id) {
+    const doc = documents.find((d) => d.id === id);
+    if (doc?.path) deleteStorageDocuments([doc.path]);
+    onChange((prev) => prev.filter((d) => d.id !== id));
+  }
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      {documents.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
+          {documents.map((doc) => (
+            <div
+              key={doc.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+              }}
+            >
+              <FileText size={16} color="var(--text-muted)" style={{ flexShrink: 0 }} />
+              <span
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  fontSize: 13,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {doc.name}
+              </span>
+              {doc.uploading && (
+                <span style={{ fontSize: 11, color: "var(--text-muted)", flexShrink: 0 }}>Uploading…</span>
+              )}
+              <button
+                onClick={() => removeDocument(doc.id)}
+                title="Remove document"
+                disabled={doc.uploading}
+                style={{
+                  width: 24,
+                  height: 24,
+                  borderRadius: 6,
+                  border: "none",
+                  background: "rgba(44,44,42,0.08)",
+                  color: "var(--text-secondary)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: 0,
+                  flexShrink: 0,
+                  opacity: doc.uploading ? 0.5 : 1,
+                }}
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <label
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "8px 12px",
+          borderRadius: 8,
+          border: "1px dashed var(--border)",
+          background: "var(--subtle)",
+          color: "var(--text-secondary)",
+          fontSize: 13,
+          cursor: "pointer",
+        }}
+      >
+        <FileText size={16} />
+        Add PDF
+        <input
+          type="file"
+          accept="application/pdf"
+          multiple
+          onChange={handleFiles}
+          style={{ display: "none" }}
+        />
+      </label>
+    </div>
+  );
+}
+
+
+function DocumentListDisplay({ documents }) {
+  if (!documents || documents.length === 0) return null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
+      {documents.map((doc) => (
+        <StorageDocument key={doc.id} document={doc} />
+      ))}
     </div>
   );
 }
@@ -3108,6 +3288,7 @@ function AddTaskModal({ homeId, contractors, taskLibrary, existingTasks, onClose
   const [frequencyMonths, setFrequencyMonths] = useState(() => readFormDraft(draftKey)?.frequencyMonths ?? 6);
   const [contractorId, setContractorId] = useState(() => readFormDraft(draftKey)?.contractorId ?? "");
   const [images, setImages] = useState(() => readFormDraft(draftKey)?.images ?? []);
+  const [documents, setDocuments] = useState(() => readFormDraft(draftKey)?.documents ?? []);
   const [libraryTaskId, setLibraryTaskId] = useState(() => readFormDraft(draftKey)?.libraryTaskId ?? "");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -3127,11 +3308,12 @@ function AddTaskModal({ homeId, contractors, taskLibrary, existingTasks, onClose
       frequencyMonths,
       contractorId,
       images: imagesForDraft(images),
+      documents: documentsForDraft(documents),
       libraryTaskId,
       nextDue,
       saveToLibrary,
     });
-  }, [draftKey, mode, title, category, frequencyMonths, contractorId, images, libraryTaskId, nextDue, saveToLibrary]);
+  }, [draftKey, mode, title, category, frequencyMonths, contractorId, images, documents, libraryTaskId, nextDue, saveToLibrary]);
 
   const sortedLibrary = [...taskLibrary].sort((a, b) => a.title.localeCompare(b.title));
   const selectedLibraryItem = taskLibrary.find((t) => t.id === libraryTaskId);
@@ -3157,8 +3339,8 @@ function AddTaskModal({ homeId, contractors, taskLibrary, existingTasks, onClose
   async function handleSave() {
     setError("");
 
-    if (imagesStillUploading(images)) {
-      setError("Wait for photos to finish uploading before saving.");
+    if (imagesStillUploading(images) || filesStillUploading(documents)) {
+      setError("Wait for files to finish uploading before saving.");
       return;
     }
 
@@ -3182,6 +3364,7 @@ function AddTaskModal({ homeId, contractors, taskLibrary, existingTasks, onClose
         frequencyMonths: Number(selectedLibraryItem.frequencyMonths),
         contractorId: contractorId || null,
         images,
+        documents,
         nextDue: nextDue || null,
       });
     } else {
@@ -3216,6 +3399,7 @@ function AddTaskModal({ homeId, contractors, taskLibrary, existingTasks, onClose
         frequencyMonths: Number(frequencyMonths),
         contractorId: contractorId || null,
         images,
+        documents,
         nextDue: nextDue || null,
       });
     }
@@ -3292,6 +3476,8 @@ function AddTaskModal({ homeId, contractors, taskLibrary, existingTasks, onClose
               </select>
               <label style={labelStyle}>Photos</label>
               <ImageUploadGrid images={images} onChange={setImages} uploadFolder="tasks" />
+              <label style={labelStyle}>Documents</label>
+              <DocumentUploadList documents={documents} onChange={setDocuments} uploadFolder="tasks" />
             </>
           )}
 
@@ -3379,6 +3565,8 @@ function AddTaskModal({ homeId, contractors, taskLibrary, existingTasks, onClose
           </select>
           <label style={labelStyle}>Photos</label>
           <ImageUploadGrid images={images} onChange={setImages} uploadFolder="tasks" />
+          <label style={labelStyle}>Documents</label>
+          <DocumentUploadList documents={documents} onChange={setDocuments} uploadFolder="tasks" />
 
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text-secondary)", marginBottom: 14, cursor: "pointer" }}>
             <input
@@ -3515,6 +3703,7 @@ function AddProjectModal({ homeId, contractors, initial, onClose, onSave }) {
   const [paints, setPaints] = useState(() => savedDraft?.paints ?? initial?.paints ?? []);
   const [contractorIds, setContractorIds] = useState(() => savedDraft?.contractorIds ?? initial?.contractorIds ?? []);
   const [images, setImages] = useState(() => savedDraft?.images ?? initial?.images ?? []);
+  const [documents, setDocuments] = useState(() => savedDraft?.documents ?? initial?.documents ?? []);
   const [expenses, setExpenses] = useState(() => savedDraft?.expenses ?? initial?.expenses ?? []);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -3532,12 +3721,13 @@ function AddProjectModal({ homeId, contractors, initial, onClose, onSave }) {
       paints,
       contractorIds,
       images: imagesForDraft(images),
+      documents: documentsForDraft(documents),
       expenses: expenses.map((e) => ({
         ...e,
         receipt: e.receipt ? imagesForDraft([e.receipt])[0] ?? null : null,
       })),
     });
-  }, [draftKey, title, date, notes, paints, contractorIds, images, expenses]);
+  }, [draftKey, title, date, notes, paints, contractorIds, images, documents, expenses]);
 
   function addPaintRow() {
     setPaints([...paints, { name: "", hex: "#CCCCCC", location: "" }]);
@@ -3555,8 +3745,8 @@ function AddProjectModal({ homeId, contractors, initial, onClose, onSave }) {
     if (!title.trim()) return;
     setError("");
 
-    if (imagesStillUploading(images)) {
-      setError("Wait for photos to finish uploading before saving.");
+    if (imagesStillUploading(images) || filesStillUploading(documents)) {
+      setError("Wait for files to finish uploading before saving.");
       return;
     }
 
@@ -3568,6 +3758,7 @@ function AddProjectModal({ homeId, contractors, initial, onClose, onSave }) {
       paints: paints.filter((p) => p.name.trim()),
       contractorIds,
       images,
+      documents,
       expenses,
     });
     setSaving(false);
@@ -3676,6 +3867,9 @@ function AddProjectModal({ homeId, contractors, initial, onClose, onSave }) {
       <label style={labelStyle}>Photos</label>
       <ImageUploadGrid images={images} onChange={setImages} uploadFolder="projects" />
 
+      <label style={labelStyle}>Documents</label>
+      <DocumentUploadList documents={documents} onChange={setDocuments} uploadFolder="projects" />
+
       <label style={labelStyle}>Expenses</label>
       <ExpenseEditor expenses={expenses} onChange={setExpenses} />
 
@@ -3722,7 +3916,7 @@ function AddContractorModal({ tradeOptions, initial, onClose, onSave }) {
     if (!file) return;
     if (coiImage?.path) await deleteStorageImage(coiImage.path);
     const uploaded = await uploadImage(file, "coi");
-    if (uploaded) {
+    if (uploaded?.path) {
       setCoiImage({ ...uploaded, preview: URL.createObjectURL(file) });
     }
     e.target.value = "";
@@ -4428,7 +4622,7 @@ function PropertyForm({ initial, onSave, onCancel, saveLabel }) {
     if (!file) return;
     if (image?.path) await deleteStorageImage(image.path);
     const uploaded = await uploadImage(file, "homes");
-    if (uploaded) {
+    if (uploaded?.path) {
       setImage({ ...uploaded, preview: URL.createObjectURL(file) });
     }
     e.target.value = "";
@@ -4759,6 +4953,7 @@ function WarrantyCard({ warranty, contractor, onEdit, onDelete }) {
           ))}
         </div>
       )}
+      <DocumentListDisplay documents={warranty.documents} />
     </div>
   );
 }
@@ -4785,6 +4980,7 @@ function AddWarrantyModal({ homeId, contractors, propertyName, initial, onClose,
   const [contractorId, setContractorId] = useState(() => savedDraft?.contractorId ?? initial?.contractorId ?? "");
   const [notes, setNotes] = useState(() => savedDraft?.notes ?? initial?.notes ?? "");
   const [images, setImages] = useState(() => savedDraft?.images ?? initial?.images ?? []);
+  const [documents, setDocuments] = useState(() => savedDraft?.documents ?? initial?.documents ?? []);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [draftRestored] = useState(() => {
@@ -4815,6 +5011,7 @@ function AddWarrantyModal({ homeId, contractors, propertyName, initial, onClose,
       contractorId,
       notes,
       images: imagesForDraft(images),
+      documents: documentsForDraft(documents),
     });
   }, [
     draftKey,
@@ -4831,14 +5028,15 @@ function AddWarrantyModal({ homeId, contractors, propertyName, initial, onClose,
     contractorId,
     notes,
     images,
+    documents,
   ]);
 
   async function handleSave() {
     if (!name.trim()) return;
     setError("");
 
-    if (imagesStillUploading(images)) {
-      setError("Wait for photos to finish uploading before saving.");
+    if (imagesStillUploading(images) || filesStillUploading(documents)) {
+      setError("Wait for files to finish uploading before saving.");
       return;
     }
 
@@ -4857,6 +5055,7 @@ function AddWarrantyModal({ homeId, contractors, propertyName, initial, onClose,
       contractorId: contractorId || null,
       notes: notes.trim(),
       images,
+      documents,
     });
     setSaving(false);
 
@@ -5012,6 +5211,9 @@ function AddWarrantyModal({ homeId, contractors, propertyName, initial, onClose,
 
       <label style={labelStyle}>Photos</label>
       <ImageUploadGrid images={images} onChange={setImages} uploadFolder="warranties" />
+
+      <label style={labelStyle}>Documents</label>
+      <DocumentUploadList documents={documents} onChange={setDocuments} uploadFolder="warranties" />
 
       {error && (
         <p style={{ fontSize: 12, color: "#A32D2D", margin: "0 0 14px" }}>

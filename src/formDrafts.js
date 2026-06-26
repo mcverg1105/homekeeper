@@ -42,3 +42,15 @@ export function imagesForDraft(images) {
       src: img.src,
     }));
 }
+
+export function documentsForDraft(documents) {
+  if (!Array.isArray(documents)) return [];
+  return documents
+    .filter((doc) => doc?.path)
+    .map((doc) => ({
+      id: doc.id,
+      name: doc.name,
+      path: doc.path,
+      mimeType: doc.mimeType,
+    }));
+}
