@@ -824,20 +824,23 @@ export default function App({ session }) {
   }
 
   async function addContractor(newContractor) {
-    const userId = session?.user?.id;
-    if (!userId) return;
+    if (!session?.user?.id) {
+      return { ok: false, error: "Sign in to add a contractor." };
+    }
 
     const name = trimRequired(newContractor.name);
-    if (!name) return;
+    if (!name) return { ok: false, error: "Contact name is required." };
 
     const email = trimOptional(newContractor.email);
-    if (email && !isValidEmail(email)) return;
+    if (email && !isValidEmail(email)) {
+      return { ok: false, error: "Enter a valid email address." };
+    }
 
     const trade = trimRequired(newContractor.trade);
-    if (!trade) return;
+    if (!trade) return { ok: false, error: "Choose a trade." };
 
     const payload = {
-      user_id: userId,
+      user_id: session.user.id,
       name,
       company: trimOptional(newContractor.company),
       trade,
@@ -863,7 +866,7 @@ export default function App({ session }) {
 
     if (error) {
       console.error("Error adding contractor:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not save contractor.") };
     }
 
     setContractors((prev) => [...prev, {
@@ -883,20 +886,24 @@ export default function App({ session }) {
       notes: data.notes,
     }]);
     setEditingContractor(null);
+    return { ok: true };
   }
 
   async function editContractor(contractorId, updates) {
-    const userId = session?.user?.id;
-    if (!userId || !contractorId) return;
+    if (!session?.user?.id || !contractorId) {
+      return { ok: false, error: "Could not update contractor." };
+    }
 
     const name = trimRequired(updates.name);
-    if (!name) return;
+    if (!name) return { ok: false, error: "Contact name is required." };
 
     const email = trimOptional(updates.email);
-    if (email && !isValidEmail(email)) return;
+    if (email && !isValidEmail(email)) {
+      return { ok: false, error: "Enter a valid email address." };
+    }
 
     const trade = trimRequired(updates.trade);
-    if (!trade) return;
+    if (!trade) return { ok: false, error: "Choose a trade." };
 
     const oldContractor = contractors.find((c) => c.id === contractorId);
     const newCoiImage = imageForDb(updates.coiImage);
@@ -923,11 +930,11 @@ export default function App({ session }) {
       .from("contractors")
       .update(sanitized)
       .eq("id", contractorId)
-      .eq("user_id", userId);
+      .eq("user_id", session.user.id);
 
     if (error) {
       console.error("Error updating contractor:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not update contractor.") };
     }
 
     if (oldContractor?.coiImage?.path && oldContractor.coiImage.path !== newCoiImage?.path) {
@@ -952,6 +959,7 @@ export default function App({ session }) {
         notes: sanitized.notes,
       } : c))
     );
+    return { ok: true };
   }
 
   async function deleteContractor(contractorId) {
@@ -1647,13 +1655,13 @@ export default function App({ session }) {
           tradeOptions={tradeOptions}
           initial={editingContractor === "new" ? null : editingContractor}
           onClose={() => setEditingContractor(null)}
-          onSave={(data) => {
+          onSave={async (data) => {
             if (editingContractor === "new") {
-              addContractor(data);
-            } else {
-              editContractor(editingContractor.id, data);
-              setEditingContractor(null);
+              return addContractor(data);
             }
+            const result = await editContractor(editingContractor.id, data);
+            if (result?.ok !== false) setEditingContractor(null);
+            return result;
           }}
         />
       )}
@@ -3897,19 +3905,70 @@ const HOME_COLORS = ["#2F4A3E", "#C4644A", "#7F77DD", "#D4537E", "#378ADD", "#85
 // ============================================================================
 
 function AddContractorModal({ tradeOptions, initial, onClose, onSave }) {
-  const [name, setName] = useState(initial?.name || "");
-  const [company, setCompany] = useState(initial?.company || "");
-  const [trade, setTrade] = useState(initial?.trade || tradeOptions[0] || "General");
-  const [phoneMobile, setPhoneMobile] = useState(initial?.phoneMobile || "");
-  const [phoneOffice, setPhoneOffice] = useState(initial?.phoneOffice || "");
-  const [email, setEmail] = useState(initial?.email || "");
-  const [licenseNumber, setLicenseNumber] = useState(initial?.licenseNumber || "");
-  const [insuranceProvider, setInsuranceProvider] = useState(initial?.insuranceProvider || "");
-  const [insurancePolicyNumber, setInsurancePolicyNumber] = useState(initial?.insurancePolicyNumber || "");
-  const [insuranceExpires, setInsuranceExpires] = useState(initial?.insuranceExpires || "");
-  const [coiImage, setCoiImage] = useState(initial?.coiImage || null);
-  const [rating, setRating] = useState(initial?.rating || 0);
-  const [notes, setNotes] = useState(initial?.notes || "");
+  const isNew = !initial;
+  const draftKey = isNew ? "contractor:new" : null;
+  const savedDraft = isNew ? readFormDraft(draftKey) : null;
+
+  const [company, setCompany] = useState(() => savedDraft?.company ?? initial?.company ?? "");
+  const [name, setName] = useState(() => savedDraft?.name ?? initial?.name ?? "");
+  const [trade, setTrade] = useState(() => savedDraft?.trade ?? initial?.trade ?? "");
+  const [phoneMobile, setPhoneMobile] = useState(() => savedDraft?.phoneMobile ?? initial?.phoneMobile ?? "");
+  const [phoneOffice, setPhoneOffice] = useState(() => savedDraft?.phoneOffice ?? initial?.phoneOffice ?? "");
+  const [email, setEmail] = useState(() => savedDraft?.email ?? initial?.email ?? "");
+  const [licenseNumber, setLicenseNumber] = useState(() => savedDraft?.licenseNumber ?? initial?.licenseNumber ?? "");
+  const [insuranceProvider, setInsuranceProvider] = useState(() => savedDraft?.insuranceProvider ?? initial?.insuranceProvider ?? "");
+  const [insurancePolicyNumber, setInsurancePolicyNumber] = useState(() => savedDraft?.insurancePolicyNumber ?? initial?.insurancePolicyNumber ?? "");
+  const [insuranceExpires, setInsuranceExpires] = useState(() => savedDraft?.insuranceExpires ?? initial?.insuranceExpires ?? "");
+  const [coiImage, setCoiImage] = useState(() => savedDraft?.coiImage ?? initial?.coiImage ?? null);
+  const [rating, setRating] = useState(() => savedDraft?.rating ?? initial?.rating ?? 0);
+  const [notes, setNotes] = useState(() => savedDraft?.notes ?? initial?.notes ?? "");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [draftRestored] = useState(() => {
+    if (!savedDraft) return false;
+    return !!(
+      savedDraft.company ||
+      savedDraft.name ||
+      savedDraft.trade ||
+      savedDraft.phoneMobile ||
+      savedDraft.email ||
+      savedDraft.notes
+    );
+  });
+
+  useEffect(() => {
+    if (!draftKey) return;
+    writeFormDraft(draftKey, {
+      company,
+      name,
+      trade,
+      phoneMobile,
+      phoneOffice,
+      email,
+      licenseNumber,
+      insuranceProvider,
+      insurancePolicyNumber,
+      insuranceExpires,
+      coiImage: coiImage ? imagesForDraft([coiImage])[0] ?? null : null,
+      rating,
+      notes,
+    });
+  }, [
+    draftKey,
+    company,
+    name,
+    trade,
+    phoneMobile,
+    phoneOffice,
+    email,
+    licenseNumber,
+    insuranceProvider,
+    insurancePolicyNumber,
+    insuranceExpires,
+    coiImage,
+    rating,
+    notes,
+  ]);
 
   async function handleCoiUpload(e) {
     const file = e.target.files && e.target.files[0];
@@ -3928,9 +3987,23 @@ function AddContractorModal({ tradeOptions, initial, onClose, onSave }) {
     setCoiImage(null);
   }
 
-  function handleSave() {
-    if (!name.trim()) return;
-    onSave({
+  async function handleSave() {
+    setError("");
+    if (!name.trim()) {
+      setError("Contact name is required.");
+      return;
+    }
+    if (!trade) {
+      setError("Choose a trade.");
+      return;
+    }
+    if (email.trim() && !isValidEmail(email.trim())) {
+      setError("Enter a valid email address.");
+      return;
+    }
+
+    setSaving(true);
+    const result = await onSave({
       name: name.trim(),
       company: company.trim(),
       trade,
@@ -3945,27 +4018,44 @@ function AddContractorModal({ tradeOptions, initial, onClose, onSave }) {
       rating,
       notes: notes.trim(),
     });
+    setSaving(false);
+
+    if (result?.ok === false) {
+      setError(result.error || "Could not save contractor.");
+    } else {
+      clearFormDraft(draftKey);
+    }
   }
 
   return (
     <Modal title={initial ? "Edit contractor" : "Add contractor"} onClose={onClose}>
-      <label style={labelStyle}>Name</label>
-      <input
-        style={inputStyle}
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="e.g. Mike Donnelly"
-        autoFocus
-      />
+      {draftRestored && (
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px", lineHeight: 1.5 }}>
+          Restored your unsaved draft.
+        </p>
+      )}
       <label style={labelStyle}>Company</label>
       <input
         style={inputStyle}
         value={company}
         onChange={(e) => setCompany(e.target.value)}
         placeholder="e.g. Donnelly Plumbing & Heating"
+        autoFocus
+      />
+      <label style={labelStyle}>Contact name</label>
+      <input
+        style={inputStyle}
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="e.g. Mike Donnelly"
       />
       <label style={labelStyle}>Trade</label>
-      <select style={inputStyle} value={trade} onChange={(e) => setTrade(e.target.value)}>
+      <select
+        style={{ ...inputStyle, borderColor: error && !trade ? "#A32D2D" : "var(--border)" }}
+        value={trade}
+        onChange={(e) => setTrade(e.target.value)}
+      >
+        <option value="">Choose a trade...</option>
         {sortWithOtherLast(tradeOptions).map((t) => (
           <option key={t} value={t}>{t}</option>
         ))}
@@ -4115,8 +4205,13 @@ function AddContractorModal({ tradeOptions, initial, onClose, onSave }) {
         onChange={(e) => setNotes(e.target.value)}
         placeholder="What did they do, would you hire them again..."
       />
-      <button style={saveButtonStyle} onClick={handleSave}>
-        {initial ? "Save changes" : "Add contractor"}
+      {error && (
+        <p style={{ fontSize: 12, color: "#A32D2D", margin: "0 0 14px" }}>
+          {error}
+        </p>
+      )}
+      <button style={saveButtonStyle} onClick={handleSave} disabled={saving}>
+        {saving ? "Saving..." : initial ? "Save changes" : "Add contractor"}
       </button>
     </Modal>
   );
