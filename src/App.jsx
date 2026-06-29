@@ -1079,7 +1079,7 @@ export default function App({ session }) {
     }
 
     const name = trimRequired(newWarranty.name);
-    if (!name) return { ok: false, error: "Warranty name is required." };
+    if (!name) return { ok: false, error: "Purchase name is required." };
 
     if (imagesStillUploading(newWarranty.images) || filesStillUploading(newWarranty.documents)) {
       return { ok: false, error: "Wait for files to finish uploading before saving." };
@@ -1116,7 +1116,7 @@ export default function App({ session }) {
 
     if (error) {
       console.error("Error adding warranty:", error);
-      return { ok: false, error: saveErrorMessage(error, "Could not save warranty.") };
+      return { ok: false, error: saveErrorMessage(error, "Could not save purchase.") };
     }
 
     await reloadActiveHomeData();
@@ -1126,11 +1126,11 @@ export default function App({ session }) {
 
   async function editWarranty(warrantyId, updates) {
     if (!session?.user?.id || !warrantyId) {
-      return { ok: false, error: "Could not update warranty." };
+      return { ok: false, error: "Could not update purchase." };
     }
 
     const name = trimRequired(updates.name);
-    if (!name) return { ok: false, error: "Warranty name is required." };
+    if (!name) return { ok: false, error: "Purchase name is required." };
 
     if (imagesStillUploading(updates.images) || filesStillUploading(updates.documents)) {
       return { ok: false, error: "Wait for files to finish uploading before saving." };
@@ -1172,7 +1172,7 @@ export default function App({ session }) {
 
     if (error) {
       console.error("Error updating warranty:", error);
-      return { ok: false, error: saveErrorMessage(error, "Could not update warranty.") };
+      return { ok: false, error: saveErrorMessage(error, "Could not update purchase.") };
     }
 
     await deleteStorageImages([
@@ -1616,8 +1616,8 @@ export default function App({ session }) {
           <ViewTab
             active={view === "warranties"}
             onClick={() => setView("warranties")}
-            icon={Shield}
-            label="Warranties"
+            icon={ShoppingBag}
+            label="Purchases"
           />
           <ViewTab
             active={view === "activity"}
@@ -4953,13 +4953,13 @@ function WarrantiesView({ warranties, contractors, onAddWarranty, onEditWarranty
   return (
     <div>
       <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
-        <ActionButton onClick={onAddWarranty} icon={Plus} label="Add warranty" primary />
+        <ActionButton onClick={onAddWarranty} icon={Plus} label="Add purchase" primary />
       </div>
 
       {warranties.length === 0 ? (
         <EmptyState
-          title="No warranties saved yet"
-          body="Track appliance and installation warranties, including expiration dates and proof of purchase."
+          title="No purchases saved yet"
+          body="Track appliances, fixtures, and other purchases — including price, receipts, and coverage expiration dates."
         />
       ) : (
         <div
@@ -5243,14 +5243,14 @@ function AddWarrantyModal({ homeId, contractors, propertyName, initial, onClose,
     setSaving(false);
 
     if (result?.ok === false) {
-      setError(result.error || "Could not save warranty.");
+      setError(result.error || "Could not save purchase.");
     } else {
       clearFormDraft(draftKey);
     }
   }
 
   return (
-    <Modal title={initial ? "Edit warranty" : "Add warranty"} onClose={onClose}>
+    <Modal title={initial ? "Edit purchase" : "Add purchase"} onClose={onClose}>
       {draftRestored && (
         <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px", lineHeight: 1.5 }}>
           Restored your unsaved draft.
@@ -5349,12 +5349,12 @@ function AddWarrantyModal({ homeId, contractors, propertyName, initial, onClose,
         </div>
       </div>
 
-      <label style={labelStyle}>Warranty provider</label>
+      <label style={labelStyle}>Coverage provider</label>
       <input
         style={inputStyle}
         value={provider}
         onChange={(e) => setProvider(e.target.value)}
-        placeholder="e.g. Moen Limited Lifetime Warranty"
+        placeholder="e.g. Moen Limited Lifetime Coverage"
       />
       <label style={labelStyle}>Provider contact (phone or website)</label>
       <input
@@ -5405,7 +5405,7 @@ function AddWarrantyModal({ homeId, contractors, propertyName, initial, onClose,
       )}
 
       <button style={saveButtonStyle} onClick={handleSave} disabled={saving}>
-        {saving ? "Saving..." : initial ? "Save changes" : "Add warranty"}
+        {saving ? "Saving..." : initial ? "Save changes" : "Add purchase"}
       </button>
     </Modal>
   );
