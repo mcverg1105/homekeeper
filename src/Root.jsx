@@ -15,8 +15,19 @@ export default function Root() {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
+    } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      // Token refresh updates the Supabase client internally — avoid re-rendering
+      // the whole app (which briefly clears tasks/projects from memory).
+      setSession((prev) => {
+        if (
+          event === "TOKEN_REFRESHED" &&
+          prev?.user?.id &&
+          prev.user.id === nextSession?.user?.id
+        ) {
+          return prev;
+        }
+        return nextSession;
+      });
     });
 
     return () => subscription.unsubscribe();
