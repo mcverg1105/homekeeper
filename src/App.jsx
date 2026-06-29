@@ -435,25 +435,25 @@ export default function App({ session }) {
     loadHomeData();
   }, [userId, activeHomeId]);
 
-  async function reloadActiveHomeData() {
-    if (!userId || !activeHomeId) return;
+  async function reloadHomeData(homeId) {
+    if (!userId || !homeId) return;
 
     const { data: tasksData, error: tasksError } = await supabase
       .from("tasks")
       .select("*")
-      .eq("home_id", activeHomeId)
+      .eq("home_id", homeId)
       .order("next_due");
 
     const { data: projectsData, error: projectsError } = await supabase
       .from("projects")
       .select("*")
-      .eq("home_id", activeHomeId)
+      .eq("home_id", homeId)
       .order("date", { ascending: false });
 
     const { data: warrantiesData, error: warrantiesError } = await supabase
       .from("warranties")
       .select("*")
-      .eq("home_id", activeHomeId)
+      .eq("home_id", homeId)
       .order("date_expires");
 
     if (tasksError) console.error("Error loading tasks:", tasksError);
@@ -465,13 +465,17 @@ export default function App({ session }) {
       : await fetchCompletionsByTask(tasksData);
 
     setHomes(applyActiveHomeDetails(
-      activeHomeId,
+      homeId,
       tasksData,
       projectsData,
       warrantiesData,
       completionsByTask,
       { tasksError, projectsError, warrantiesError }
     ));
+  }
+
+  async function reloadActiveHomeData() {
+    await reloadHomeData(activeHomeId);
   }
 
   const activeHome = homes.find((h) => h.id === activeHomeId);
@@ -691,7 +695,7 @@ export default function App({ session }) {
     return { ok: true };
   }
 
-  async function editProject(projectId, updates) {
+  async function editProject(projectId, updates, sourceHomeId = activeHomeId) {
     if (!session?.user?.id || !projectId) {
       return { ok: false, error: "Could not update project." };
     }
@@ -708,7 +712,21 @@ export default function App({ session }) {
       : TODAY.toISOString().split("T")[0];
 
     const contractorIds = validateContractorIds(updates.contractorIds, contractors);
-    const oldProject = activeHome?.projects.find((p) => p.id === projectId);
+    const targetHomeId = updates.homeId && homes.some((h) => h.id === updates.homeId)
+      ? updates.homeId
+      : sourceHomeId;
+
+    if (!targetHomeId || !homes.some((h) => h.id === targetHomeId)) {
+      return { ok: false, error: "Choose a valid property." };
+    }
+
+    const oldProject = homes
+      .find((h) => h.id === sourceHomeId)
+      ?.projects?.find((p) => p.id === projectId);
+
+    if (!oldProject) {
+      return { ok: false, error: "Project not found on this property." };
+    }
 
     const sanitized = {
       title,
@@ -720,6 +738,10 @@ export default function App({ session }) {
       documents: documentsForDb(updates.documents),
       expenses: expensesForDb(updates.expenses),
     };
+
+    if (targetHomeId !== sourceHomeId) {
+      sanitized.home_id = targetHomeId;
+    }
 
     const { error } = await supabase
       .from("projects")
@@ -738,7 +760,13 @@ export default function App({ session }) {
       ...removedReceiptPaths(oldProject?.expenses, updates.expenses),
     ]);
 
-    await reloadActiveHomeData();
+    if (targetHomeId !== sourceHomeId) {
+      await reloadHomeData(sourceHomeId);
+      await reloadHomeData(targetHomeId);
+    } else {
+      await reloadHomeData(sourceHomeId);
+    }
+
     return { ok: true };
   }
 
@@ -1653,6 +1681,8 @@ export default function App({ session }) {
       {editingProject && (
         <AddProjectModal
           homeId={activeHomeId}
+          homes={homes}
+          sourceHomeId={activeHomeId}
           contractors={contractors}
           initial={editingProject === "new" ? null : editingProject}
           onClose={() => setEditingProject(null)}
@@ -1660,7 +1690,7 @@ export default function App({ session }) {
             if (editingProject === "new") {
               return addProject(data);
             }
-            const result = await editProject(editingProject.id, data);
+            const result = await editProject(editingProject.id, data, activeHomeId);
             if (result?.ok !== false) setEditingProject(null);
             return result;
           }}
@@ -3742,11 +3772,12 @@ function CompleteTaskModal({ task, contractors, onClose, onSave }) {
 }
 
 
-function AddProjectModal({ homeId, contractors, initial, onClose, onSave }) {
+function AddProjectModal({ homeId, homes, sourceHomeId, contractors, initial, onClose, onSave }) {
   const isNew = !initial;
   const draftKey = isNew && homeId ? `project:${homeId}` : null;
   const savedDraft = isNew ? readFormDraft(draftKey) : null;
 
+  const [projectHomeId, setProjectHomeId] = useState(() => sourceHomeId ?? homeId ?? "");
   const [title, setTitle] = useState(() => savedDraft?.title ?? initial?.title ?? "");
   const [date, setDate] = useState(() => savedDraft?.date ?? initial?.date ?? TODAY.toISOString().split("T")[0]);
   const [notes, setNotes] = useState(() => savedDraft?.notes ?? initial?.notes ?? "");
@@ -3802,6 +3833,7 @@ function AddProjectModal({ homeId, contractors, initial, onClose, onSave }) {
 
     setSaving(true);
     const result = await onSave({
+      homeId: projectHomeId,
       title: title.trim(),
       date,
       notes: notes.trim(),
@@ -3826,6 +3858,20 @@ function AddProjectModal({ homeId, contractors, initial, onClose, onSave }) {
         <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px", lineHeight: 1.5 }}>
           Restored your unsaved draft.
         </p>
+      )}
+      {!isNew && homes.length > 1 && (
+        <>
+          <label style={labelStyle}>Property</label>
+          <select
+            style={inputStyle}
+            value={projectHomeId}
+            onChange={(e) => setProjectHomeId(e.target.value)}
+          >
+            {[...homes].sort((a, b) => a.name.localeCompare(b.name)).map((home) => (
+              <option key={home.id} value={home.id}>{home.name}</option>
+            ))}
+          </select>
+        </>
       )}
       <label style={labelStyle}>Project title</label>
       <input
