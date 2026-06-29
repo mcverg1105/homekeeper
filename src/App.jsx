@@ -252,11 +252,74 @@ const TRADE_COLORS = {
   General: "var(--text-muted)",
 };
 
+function mergeHomesFromDb(homesData, prevHomes) {
+  const prevById = new Map(prevHomes.map((h) => [h.id, h]));
+  return homesData.map((h) => {
+    const existing = prevById.get(h.id);
+    return {
+      id: h.id,
+      user_id: h.user_id,
+      name: h.name,
+      address: h.address,
+      color: h.color,
+      image: h.image,
+      created_at: h.created_at,
+      tasks: existing?.tasks ?? [],
+      projects: existing?.projects ?? [],
+      warranties: existing?.warranties ?? [],
+    };
+  });
+}
+
+function homeDetailsFromQueries(tasksData, projectsData, warrantiesData, completionsByTask) {
+  return {
+    tasks: (tasksData || []).map((t) => mapTaskFromDb(t, completionsByTask[t.id] || [])),
+    projects: (projectsData || []).map(mapProjectFromDb),
+    warranties: (warrantiesData || []).map(mapWarrantyFromDb),
+  };
+}
+
+async function fetchCompletionsByTask(tasksData) {
+  const completionsByTask = {};
+  if (!tasksData || tasksData.length === 0) return completionsByTask;
+
+  const taskIds = tasksData.map((t) => t.id);
+  const { data: completionsData, error: completionsError } = await supabase
+    .from("task_completions")
+    .select("*")
+    .in("task_id", taskIds)
+    .order("date_completed", { ascending: false });
+
+  if (completionsError) console.error("Error loading task completions:", completionsError);
+  if (completionsData) {
+    for (const row of completionsData) {
+      if (!completionsByTask[row.task_id]) completionsByTask[row.task_id] = [];
+      completionsByTask[row.task_id].push(mapCompletionFromDb(row));
+    }
+  }
+  return completionsByTask;
+}
+
+function applyActiveHomeDetails(activeHomeId, tasksData, projectsData, warrantiesData, completionsByTask, errors) {
+  const details = homeDetailsFromQueries(tasksData, projectsData, warrantiesData, completionsByTask);
+  return (prev) =>
+    prev.map((h) => {
+      if (h.id !== activeHomeId) return h;
+      return {
+        ...h,
+        tasks: errors.tasksError ? h.tasks : details.tasks,
+        projects: errors.projectsError ? h.projects : details.projects,
+        warranties: errors.warrantiesError ? h.warranties : details.warranties,
+      };
+    });
+}
+
 // ============================================================================
 // MAIN APP
 // ============================================================================
 
 export default function App({ session }) {
+  const userId = session?.user?.id;
   const [homes, setHomes] = useState([]);
   const [contractors, setContractors] = useState([]);
   const [loadingData, setLoadingData] = useState(true);
@@ -273,8 +336,8 @@ export default function App({ session }) {
   const [editingWarranty, setEditingWarranty] = useState(null); // null | "new" | warranty object
 
   useEffect(() => {
-    if (!session) return;
-  
+    if (!userId) return;
+
     async function loadData() {
       setLoadingData(true);
 
@@ -302,11 +365,18 @@ export default function App({ session }) {
       if (contractorsError) console.error("Error loading contractors:", contractorsError);
       if (tradesError) console.error("Error loading trades:", tradesError);
       if (taskLibraryError) console.error("Error loading task library:", taskLibraryError);
-  
-        if (homesData && homesData.length > 0) {
-          setHomes(homesData.map((h) => ({ ...h, tasks: [], projects: [], warranties: [] })));
-          setActiveHomeId(homesData[0].id);
+
+      if (homesData) {
+        if (homesData.length > 0) {
+          setHomes((prev) => mergeHomesFromDb(homesData, prev));
+          setActiveHomeId((prev) =>
+            prev && homesData.some((h) => h.id === prev) ? prev : homesData[0].id
+          );
+        } else {
+          setHomes([]);
+          setActiveHomeId(null);
         }
+      }
       if (contractorsData) setContractors(contractorsData);
       if (tradesData) setTradeOptions(tradesData.map((t) => t.name));
       if (taskLibraryData) setTaskLibrary(taskLibraryData.map((t) => ({
@@ -315,15 +385,15 @@ export default function App({ session }) {
         category: t.category,
         frequencyMonths: t.frequency_months,
       })));
-  
+
       setLoadingData(false);
     }
-  
+
     loadData();
-  }, [session]);
+  }, [userId]);
 
   useEffect(() => {
-    if (!session || !activeHomeId) return;
+    if (!userId || !activeHomeId) return;
 
     async function loadHomeData() {
       const { data: tasksData, error: tasksError } = await supabase
@@ -348,39 +418,25 @@ export default function App({ session }) {
       if (projectsError) console.error("Error loading projects:", projectsError);
       if (warrantiesError) console.error("Error loading warranties:", warrantiesError);
 
-      let completionsByTask = {};
-      if (tasksData && tasksData.length > 0) {
-        const taskIds = tasksData.map((t) => t.id);
-        const { data: completionsData, error: completionsError } = await supabase
-          .from("task_completions")
-          .select("*")
-          .in("task_id", taskIds)
-          .order("date_completed", { ascending: false });
+      const completionsByTask = tasksError
+        ? {}
+        : await fetchCompletionsByTask(tasksData);
 
-        if (completionsError) console.error("Error loading task completions:", completionsError);
-        if (completionsData) {
-          for (const row of completionsData) {
-            if (!completionsByTask[row.task_id]) completionsByTask[row.task_id] = [];
-            completionsByTask[row.task_id].push(mapCompletionFromDb(row));
-          }
-        }
-      }
-
-      setHomes((prev) =>
-        prev.map((h) => (h.id === activeHomeId ? {
-          ...h,
-          tasks: (tasksData || []).map((t) => mapTaskFromDb(t, completionsByTask[t.id] || [])),
-          projects: (projectsData || []).map(mapProjectFromDb),
-          warranties: (warrantiesData || []).map(mapWarrantyFromDb),
-        } : h))
-      );
+      setHomes(applyActiveHomeDetails(
+        activeHomeId,
+        tasksData,
+        projectsData,
+        warrantiesData,
+        completionsByTask,
+        { tasksError, projectsError, warrantiesError }
+      ));
     }
 
     loadHomeData();
-  }, [session, activeHomeId]);
+  }, [userId, activeHomeId]);
 
   async function reloadActiveHomeData() {
-    if (!session || !activeHomeId) return;
+    if (!userId || !activeHomeId) return;
 
     const { data: tasksData, error: tasksError } = await supabase
       .from("tasks")
@@ -404,32 +460,18 @@ export default function App({ session }) {
     if (projectsError) console.error("Error loading projects:", projectsError);
     if (warrantiesError) console.error("Error loading warranties:", warrantiesError);
 
-    let completionsByTask = {};
-    if (tasksData && tasksData.length > 0) {
-      const taskIds = tasksData.map((t) => t.id);
-      const { data: completionsData, error: completionsError } = await supabase
-        .from("task_completions")
-        .select("*")
-        .in("task_id", taskIds)
-        .order("date_completed", { ascending: false });
+    const completionsByTask = tasksError
+      ? {}
+      : await fetchCompletionsByTask(tasksData);
 
-      if (completionsError) console.error("Error loading task completions:", completionsError);
-      if (completionsData) {
-        for (const row of completionsData) {
-          if (!completionsByTask[row.task_id]) completionsByTask[row.task_id] = [];
-          completionsByTask[row.task_id].push(mapCompletionFromDb(row));
-        }
-      }
-    }
-
-    setHomes((prev) =>
-      prev.map((h) => (h.id === activeHomeId ? {
-        ...h,
-        tasks: (tasksData || []).map((t) => mapTaskFromDb(t, completionsByTask[t.id] || [])),
-        projects: (projectsData || []).map(mapProjectFromDb),
-        warranties: (warrantiesData || []).map(mapWarrantyFromDb),
-      } : h))
-    );
+    setHomes(applyActiveHomeDetails(
+      activeHomeId,
+      tasksData,
+      projectsData,
+      warrantiesData,
+      completionsByTask,
+      { tasksError, projectsError, warrantiesError }
+    ));
   }
 
   const activeHome = homes.find((h) => h.id === activeHomeId);
