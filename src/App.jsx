@@ -2374,40 +2374,6 @@ function ProjectCard({ project, contractors, onEdit, onDelete }) {
           {project.notes}
         </p>
       )}
-      {project.paints.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: project.notes ? 0 : 4 }}>
-          {project.paints.map((paint, i) => (
-            <div
-              key={i}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                border: "1px solid var(--subtle)",
-                borderRadius: 8,
-                padding: "6px 10px 6px 6px",
-              }}
-            >
-              <span
-                style={{
-                  width: 24,
-                  height: 24,
-                  borderRadius: 6,
-                  background: paint.hex,
-                  border: "1px solid rgba(0,0,0,0.08)",
-                  flexShrink: 0,
-                }}
-              />
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 500 }}>{paint.name}</div>
-                <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  {paint.location} · {paint.hex}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
       {project.images && project.images.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
           {project.images.map((img) => (
