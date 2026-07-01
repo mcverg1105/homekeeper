@@ -2427,7 +2427,6 @@ function ProjectCard({ project, contractors, onEdit, onDelete }) {
           ))}
         </div>
       )}
-      <DocumentListDisplay documents={project.documents} />
       {project.expenses && project.expenses.length > 0 && (
         <div
           style={{
