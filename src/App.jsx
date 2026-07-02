@@ -1530,29 +1530,62 @@ export default function App({ session }) {
         </div>
       </header>
 
-      {/* Home switcher */}
-      <div
-        style={{
-          background: "var(--surface)",
-          borderBottom: "1px solid var(--border)",
-          padding: "12px 24px",
-        }}
-      >
+      <main style={{ maxWidth: 920, margin: "0 auto", padding: "28px 24px 80px" }}>
+        {/* Property header with inline switcher */}
         <div
           style={{
-            maxWidth: 920,
-            margin: "0 auto",
+            marginBottom: 24,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 14,
+            flexWrap: "wrap",
           }}
         >
+          <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0, flex: "1 1 200px" }}>
+            {activeHome.image && (
+              <StorageImage
+                image={activeHome.image}
+                alt={activeHome.image.name}
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: 10,
+                  objectFit: "cover",
+                  border: "1px solid var(--border)",
+                  flexShrink: 0,
+                }}
+              />
+            )}
+            <div style={{ minWidth: 0 }}>
+              <h1
+                style={{
+                  fontFamily: "'Source Serif 4', serif",
+                  fontSize: 28,
+                  fontWeight: 600,
+                  margin: "0 0 4px",
+                }}
+              >
+                {activeHome.name}
+              </h1>
+              {activeHome.address && (
+                <p style={{ margin: 0, fontSize: 14, color: "var(--text-muted)" }}>
+                  {activeHome.address}
+                </p>
+              )}
+            </div>
+          </div>
           <select
             value={activeHomeId}
             onChange={(e) => setActiveHomeId(e.target.value)}
+            aria-label="Switch property"
             style={{
               ...inputStyle,
               marginBottom: 0,
               width: "auto",
-              minWidth: 220,
+              minWidth: 140,
               maxWidth: "100%",
+              flexShrink: 0,
               fontWeight: 500,
               borderColor: homes.find((h) => h.id === activeHomeId)?.color,
             }}
@@ -1561,41 +1594,6 @@ export default function App({ session }) {
               <option key={home.id} value={home.id}>{home.name}</option>
             ))}
           </select>
-        </div>
-      </div>
-
-      <main style={{ maxWidth: 920, margin: "0 auto", padding: "28px 24px 80px" }}>
-        {/* Home info strip */}
-        <div style={{ marginBottom: 24, display: "flex", alignItems: "center", gap: 14 }}>
-          {activeHome.image && (
-            <StorageImage
-              image={activeHome.image}
-              alt={activeHome.image.name}
-              style={{
-                width: 56,
-                height: 56,
-                borderRadius: 10,
-                objectFit: "cover",
-                border: "1px solid var(--border)",
-                flexShrink: 0,
-              }}
-            />
-          )}
-          <div>
-            <h1
-              style={{
-                fontFamily: "'Source Serif 4', serif",
-                fontSize: 28,
-                fontWeight: 600,
-                margin: "0 0 4px",
-              }}
-            >
-              {activeHome.name}
-            </h1>
-            <p style={{ margin: 0, fontSize: 14, color: "var(--text-muted)" }}>
-              {activeHome.address}
-            </p>
-          </div>
         </div>
 
         {/* View tabs */}
