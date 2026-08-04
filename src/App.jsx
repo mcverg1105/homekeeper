@@ -1365,6 +1365,27 @@ export default function App({ session }) {
     );
   }
 
+  function openAddContractorModal() {
+    setEditingContractor("new");
+    setShowSettings(false);
+  }
+
+  const contractorModal = editingContractor ? (
+    <AddContractorModal
+      tradeOptions={tradeOptions}
+      initial={editingContractor === "new" ? null : editingContractor}
+      onClose={() => setEditingContractor(null)}
+      onSave={async (data) => {
+        if (editingContractor === "new") {
+          return addContractor(data);
+        }
+        const result = await editContractor(editingContractor.id, data);
+        if (result?.ok !== false) setEditingContractor(null);
+        return result;
+      }}
+    />
+  ) : null;
+
   if (!activeHome) return (
     <div data-theme={theme} style={{ minHeight: "100vh", background: "var(--bg)", fontFamily: "Inter, system-ui, sans-serif" }}>
       <style>{`
@@ -1399,7 +1420,7 @@ export default function App({ session }) {
         contractors={contractors}
         tasks={homes.flatMap((h) => h.tasks || [])}
         projects={homes.flatMap((h) => h.projects || [])}
-        onAddContractor={() => setEditingContractor("new")}
+        onAddContractor={openAddContractorModal}
         onEditContractor={(c) => {
           setEditingContractor(c);
           setShowSettings(false);
@@ -1408,6 +1429,7 @@ export default function App({ session }) {
         onClose={() => setShowSettings(false)}
       />
     )}
+      {contractorModal}
   </div>
 );
 
@@ -1717,7 +1739,7 @@ export default function App({ session }) {
           contractors={contractors}
           tasks={homes.flatMap((h) => h.tasks)}
           projects={homes.flatMap((h) => h.projects)}
-          onAddContractor={() => setEditingContractor("new")}
+          onAddContractor={openAddContractorModal}
           onEditContractor={(c) => {
             setEditingContractor(c);
             setShowSettings(false);
@@ -1725,22 +1747,8 @@ export default function App({ session }) {
           onDeleteContractor={deleteContractor}
           onClose={() => setShowSettings(false)}
         />
-      )}     
-      {editingContractor && (
-        <AddContractorModal
-          tradeOptions={tradeOptions}
-          initial={editingContractor === "new" ? null : editingContractor}
-          onClose={() => setEditingContractor(null)}
-          onSave={async (data) => {
-            if (editingContractor === "new") {
-              return addContractor(data);
-            }
-            const result = await editContractor(editingContractor.id, data);
-            if (result?.ok !== false) setEditingContractor(null);
-            return result;
-          }}
-        />
       )}
+      {contractorModal}
       {editingWarranty && (
         <AddWarrantyModal
           homeId={activeHomeId}
