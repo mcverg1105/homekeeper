@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { supabase } from "./supabase";
 import StorageImage from "./StorageImage";
+import StorageDocument from "./StorageDocument";
 import {
   uploadImage,
   deleteStorageImage,
@@ -38,7 +39,15 @@ import {
   collectImagePathsFromExpenses,
   collectImagePathsFromHome,
   newImageId,
+  imageUploadErrorMessage,
 } from "./imageStorage";
+import {
+  uploadDocument,
+  deleteStorageDocuments,
+  documentsForDb,
+  newDocumentId,
+} from "./documentStorage";
+import { readFormDraft, writeFormDraft, clearFormDraft, imagesForDraft, documentsForDraft } from "./formDrafts";
 
 // ============================================================================
 // HELPERS
@@ -138,6 +147,19 @@ function validateRating(value) {
   return Math.min(5, Math.max(0, Math.round(n)));
 }
 
+function filesStillUploading(files) {
+  if (!Array.isArray(files)) return false;
+  return files.some((file) => file.uploading || (!file.path && !file.src));
+}
+
+function imagesStillUploading(images) {
+  return filesStillUploading(images);
+}
+
+function saveErrorMessage(error, fallback) {
+  return error?.message || fallback;
+}
+
 function validateContractorIds(ids, contractors) {
   if (!Array.isArray(ids)) return [];
   return ids.filter((id) => contractors.some((c) => c.id === id));
@@ -165,6 +187,7 @@ function mapTaskFromDb(row, completionHistory = []) {
     contractorId: row.contractor_id,
     notes: row.notes,
     images: row.images || [],
+    documents: row.documents || [],
     completionNotes: row.completion_notes,
     completionExpenses: row.completion_expenses || [],
     completionHistory,
@@ -180,6 +203,7 @@ function mapProjectFromDb(row) {
     paints: row.paints || [],
     contractorIds: row.contractor_ids || [],
     images: row.images || [],
+    documents: row.documents || [],
     expenses: row.expenses || [],
   };
 }
@@ -200,6 +224,7 @@ function mapWarrantyFromDb(row) {
     contractorId: row.contractor_id,
     notes: row.notes,
     images: row.images || [],
+    documents: row.documents || [],
   };
 }
 
@@ -227,11 +252,74 @@ const TRADE_COLORS = {
   General: "var(--text-muted)",
 };
 
+function mergeHomesFromDb(homesData, prevHomes) {
+  const prevById = new Map(prevHomes.map((h) => [h.id, h]));
+  return homesData.map((h) => {
+    const existing = prevById.get(h.id);
+    return {
+      id: h.id,
+      user_id: h.user_id,
+      name: h.name,
+      address: h.address,
+      color: h.color,
+      image: h.image,
+      created_at: h.created_at,
+      tasks: existing?.tasks ?? [],
+      projects: existing?.projects ?? [],
+      warranties: existing?.warranties ?? [],
+    };
+  });
+}
+
+function homeDetailsFromQueries(tasksData, projectsData, warrantiesData, completionsByTask) {
+  return {
+    tasks: (tasksData || []).map((t) => mapTaskFromDb(t, completionsByTask[t.id] || [])),
+    projects: (projectsData || []).map(mapProjectFromDb),
+    warranties: (warrantiesData || []).map(mapWarrantyFromDb),
+  };
+}
+
+async function fetchCompletionsByTask(tasksData) {
+  const completionsByTask = {};
+  if (!tasksData || tasksData.length === 0) return completionsByTask;
+
+  const taskIds = tasksData.map((t) => t.id);
+  const { data: completionsData, error: completionsError } = await supabase
+    .from("task_completions")
+    .select("*")
+    .in("task_id", taskIds)
+    .order("date_completed", { ascending: false });
+
+  if (completionsError) console.error("Error loading task completions:", completionsError);
+  if (completionsData) {
+    for (const row of completionsData) {
+      if (!completionsByTask[row.task_id]) completionsByTask[row.task_id] = [];
+      completionsByTask[row.task_id].push(mapCompletionFromDb(row));
+    }
+  }
+  return completionsByTask;
+}
+
+function applyActiveHomeDetails(activeHomeId, tasksData, projectsData, warrantiesData, completionsByTask, errors) {
+  const details = homeDetailsFromQueries(tasksData, projectsData, warrantiesData, completionsByTask);
+  return (prev) =>
+    prev.map((h) => {
+      if (h.id !== activeHomeId) return h;
+      return {
+        ...h,
+        tasks: errors.tasksError ? h.tasks : details.tasks,
+        projects: errors.projectsError ? h.projects : details.projects,
+        warranties: errors.warrantiesError ? h.warranties : details.warranties,
+      };
+    });
+}
+
 // ============================================================================
 // MAIN APP
 // ============================================================================
 
 export default function App({ session }) {
+  const userId = session?.user?.id;
   const [homes, setHomes] = useState([]);
   const [contractors, setContractors] = useState([]);
   const [loadingData, setLoadingData] = useState(true);
@@ -248,8 +336,8 @@ export default function App({ session }) {
   const [editingWarranty, setEditingWarranty] = useState(null); // null | "new" | warranty object
 
   useEffect(() => {
-    if (!session) return;
-  
+    if (!userId) return;
+
     async function loadData() {
       setLoadingData(true);
 
@@ -277,11 +365,18 @@ export default function App({ session }) {
       if (contractorsError) console.error("Error loading contractors:", contractorsError);
       if (tradesError) console.error("Error loading trades:", tradesError);
       if (taskLibraryError) console.error("Error loading task library:", taskLibraryError);
-  
-        if (homesData && homesData.length > 0) {
-          setHomes(homesData.map((h) => ({ ...h, tasks: [], projects: [], warranties: [] })));
-          setActiveHomeId(homesData[0].id);
+
+      if (homesData) {
+        if (homesData.length > 0) {
+          setHomes((prev) => mergeHomesFromDb(homesData, prev));
+          setActiveHomeId((prev) =>
+            prev && homesData.some((h) => h.id === prev) ? prev : homesData[0].id
+          );
+        } else {
+          setHomes([]);
+          setActiveHomeId(null);
         }
+      }
       if (contractorsData) setContractors(contractorsData);
       if (tradesData) setTradeOptions(tradesData.map((t) => t.name));
       if (taskLibraryData) setTaskLibrary(taskLibraryData.map((t) => ({
@@ -290,15 +385,15 @@ export default function App({ session }) {
         category: t.category,
         frequencyMonths: t.frequency_months,
       })));
-  
+
       setLoadingData(false);
     }
-  
+
     loadData();
-  }, [session]);
+  }, [userId]);
 
   useEffect(() => {
-    if (!session || !activeHomeId) return;
+    if (!userId || !activeHomeId) return;
 
     async function loadHomeData() {
       const { data: tasksData, error: tasksError } = await supabase
@@ -323,34 +418,65 @@ export default function App({ session }) {
       if (projectsError) console.error("Error loading projects:", projectsError);
       if (warrantiesError) console.error("Error loading warranties:", warrantiesError);
 
-      let completionsByTask = {};
-      if (tasksData && tasksData.length > 0) {
-        const taskIds = tasksData.map((t) => t.id);
-        const { data: completionsData, error: completionsError } = await supabase
-          .from("task_completions")
-          .select("*")
-          .in("task_id", taskIds)
-          .order("date_completed", { ascending: false });
+      const completionsByTask = tasksError
+        ? {}
+        : await fetchCompletionsByTask(tasksData);
 
-        if (completionsError) console.error("Error loading task completions:", completionsError);
-        if (completionsData) {
-          for (const row of completionsData) {
-            if (!completionsByTask[row.task_id]) completionsByTask[row.task_id] = [];
-            completionsByTask[row.task_id].push(mapCompletionFromDb(row));
-          }
-        }
-      }
-
-      updateHome(activeHomeId, (home) => ({
-        ...home,
-        tasks: (tasksData || []).map((t) => mapTaskFromDb(t, completionsByTask[t.id] || [])),
-        projects: (projectsData || []).map(mapProjectFromDb),
-        warranties: (warrantiesData || []).map(mapWarrantyFromDb),
-      }));
+      setHomes(applyActiveHomeDetails(
+        activeHomeId,
+        tasksData,
+        projectsData,
+        warrantiesData,
+        completionsByTask,
+        { tasksError, projectsError, warrantiesError }
+      ));
     }
 
     loadHomeData();
-  }, [session, activeHomeId]);
+  }, [userId, activeHomeId]);
+
+  async function reloadHomeData(homeId) {
+    if (!userId || !homeId) return;
+
+    const { data: tasksData, error: tasksError } = await supabase
+      .from("tasks")
+      .select("*")
+      .eq("home_id", homeId)
+      .order("next_due");
+
+    const { data: projectsData, error: projectsError } = await supabase
+      .from("projects")
+      .select("*")
+      .eq("home_id", homeId)
+      .order("date", { ascending: false });
+
+    const { data: warrantiesData, error: warrantiesError } = await supabase
+      .from("warranties")
+      .select("*")
+      .eq("home_id", homeId)
+      .order("date_expires");
+
+    if (tasksError) console.error("Error loading tasks:", tasksError);
+    if (projectsError) console.error("Error loading projects:", projectsError);
+    if (warrantiesError) console.error("Error loading warranties:", warrantiesError);
+
+    const completionsByTask = tasksError
+      ? {}
+      : await fetchCompletionsByTask(tasksData);
+
+    setHomes(applyActiveHomeDetails(
+      homeId,
+      tasksData,
+      projectsData,
+      warrantiesData,
+      completionsByTask,
+      { tasksError, projectsError, warrantiesError }
+    ));
+  }
+
+  async function reloadActiveHomeData() {
+    await reloadHomeData(activeHomeId);
+  }
 
   const activeHome = homes.find((h) => h.id === activeHomeId);
 
@@ -439,31 +565,41 @@ export default function App({ session }) {
   }
 
   async function addTask(newTask) {
-    const userId = session?.user?.id;
-    if (!userId || !activeHomeId) return;
+    if (!session?.user?.id || !activeHomeId) {
+      return { ok: false, error: "No active property selected." };
+    }
 
     const title = trimRequired(newTask.title);
-    if (!title) return;
+    if (!title) return { ok: false, error: "Task title is required." };
 
     const category = validateTaskCategory(newTask.category);
-    if (!category) return;
+    if (!category) {
+      return { ok: false, error: `Invalid category "${newTask.category}". Use a standard maintenance category.` };
+    }
 
     const frequencyMonths = validateFrequencyMonths(newTask.frequencyMonths);
-    if (frequencyMonths === null) return;
+    if (frequencyMonths === null) {
+      return { ok: false, error: "Repeat interval must be between 1 and 120 months." };
+    }
 
     const contractorId = newTask.contractorId || null;
-    if (contractorId && !contractors.some((c) => c.id === contractorId)) return;
+    if (contractorId && !contractors.some((c) => c.id === contractorId)) {
+      return { ok: false, error: "Selected contractor is no longer available." };
+    }
+
+    if (imagesStillUploading(newTask.images) || filesStillUploading(newTask.documents)) {
+      return { ok: false, error: "Wait for files to finish uploading before saving." };
+    }
 
     const nextDueValue = newTask.nextDue
       ? (isValidDateStr(newTask.nextDue) ? newTask.nextDue : null)
       : addMonths(TODAY.toISOString().split("T")[0], frequencyMonths);
-    if (!nextDueValue) return;
+    if (!nextDueValue) return { ok: false, error: "Enter a valid first due date." };
 
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from("tasks")
       .insert({
         home_id: activeHomeId,
-        user_id: userId,
         title,
         category,
         frequency_months: frequencyMonths,
@@ -471,20 +607,17 @@ export default function App({ session }) {
         next_due: nextDueValue,
         contractor_id: contractorId,
         images: imagesForDb(newTask.images),
-      })
-      .select()
-      .single();
+        documents: documentsForDb(newTask.documents),
+      });
 
     if (error) {
       console.error("Error adding task:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not save task.") };
     }
 
-    updateHome(activeHomeId, (home) => ({
-      ...home,
-      tasks: [...home.tasks, mapTaskFromDb(data)],
-    }));
+    await reloadActiveHomeData();
     setShowAddTask(false);
+    return { ok: true };
   }
 
   async function deleteTask(taskId) {
@@ -494,6 +627,7 @@ export default function App({ session }) {
     const task = activeHome?.tasks.find((t) => t.id === taskId);
     const paths = [
       ...collectImagePaths(task?.images),
+      ...collectImagePaths(task?.documents),
       ...(task?.completionHistory || []).flatMap((entry) => [
         ...collectImagePaths(entry.images),
         ...collectImagePathsFromExpenses(entry.expenses),
@@ -520,11 +654,16 @@ export default function App({ session }) {
   }
 
   async function addProject(newProject) {
-    const userId = session?.user?.id;
-    if (!userId || !activeHomeId) return;
+    if (!session?.user?.id || !activeHomeId) {
+      return { ok: false, error: "No active property selected." };
+    }
 
     const title = trimRequired(newProject.title);
-    if (!title) return;
+    if (!title) return { ok: false, error: "Project title is required." };
+
+    if (imagesStillUploading(newProject.images) || filesStillUploading(newProject.documents)) {
+      return { ok: false, error: "Wait for files to finish uploading before saving." };
+    }
 
     const date = isValidDateStr(newProject.date)
       ? newProject.date
@@ -532,47 +671,62 @@ export default function App({ session }) {
 
     const contractorIds = validateContractorIds(newProject.contractorIds, contractors);
 
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from("projects")
       .insert({
         home_id: activeHomeId,
-        user_id: userId,
         title,
         date,
         notes: trimOptional(newProject.notes),
         paints: Array.isArray(newProject.paints) ? newProject.paints : [],
         contractor_ids: contractorIds,
         images: imagesForDb(newProject.images),
+        documents: documentsForDb(newProject.documents),
         expenses: expensesForDb(newProject.expenses),
-      })
-      .select()
-      .single();
+      });
 
     if (error) {
       console.error("Error adding project:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not save project.") };
     }
 
-    updateHome(activeHomeId, (home) => ({
-      ...home,
-      projects: [mapProjectFromDb(data), ...home.projects],
-    }));
+    await reloadActiveHomeData();
     setEditingProject(null);
+    return { ok: true };
   }
 
-  async function editProject(projectId, updates) {
-    const userId = session?.user?.id;
-    if (!userId || !projectId) return;
+  async function editProject(projectId, updates, sourceHomeId = activeHomeId) {
+    if (!session?.user?.id || !projectId) {
+      return { ok: false, error: "Could not update project." };
+    }
 
     const title = trimRequired(updates.title);
-    if (!title) return;
+    if (!title) return { ok: false, error: "Project title is required." };
+
+    if (imagesStillUploading(updates.images) || filesStillUploading(updates.documents)) {
+      return { ok: false, error: "Wait for files to finish uploading before saving." };
+    }
 
     const date = isValidDateStr(updates.date)
       ? updates.date
       : TODAY.toISOString().split("T")[0];
 
     const contractorIds = validateContractorIds(updates.contractorIds, contractors);
-    const oldProject = activeHome?.projects.find((p) => p.id === projectId);
+    const targetHomeId = updates.homeId && homes.some((h) => h.id === updates.homeId)
+      ? updates.homeId
+      : sourceHomeId;
+
+    if (!targetHomeId || !homes.some((h) => h.id === targetHomeId)) {
+      return { ok: false, error: "Choose a valid property." };
+    }
+
+    const oldProject = homes
+      .find((h) => h.id === sourceHomeId)
+      ?.projects?.find((p) => p.id === projectId);
+
+    if (!oldProject) {
+      return { ok: false, error: "Project not found on this property." };
+    }
 
     const sanitized = {
       title,
@@ -581,32 +735,39 @@ export default function App({ session }) {
       paints: Array.isArray(updates.paints) ? updates.paints : [],
       contractor_ids: contractorIds,
       images: imagesForDb(updates.images),
+      documents: documentsForDb(updates.documents),
       expenses: expensesForDb(updates.expenses),
     };
 
-    const { data, error } = await supabase
+    if (targetHomeId !== sourceHomeId) {
+      sanitized.home_id = targetHomeId;
+    }
+
+    const { error } = await supabase
       .from("projects")
       .update(sanitized)
       .eq("id", projectId)
-      .eq("user_id", userId)
-      .select()
-      .single();
+      .eq("user_id", session.user.id);
 
     if (error) {
       console.error("Error updating project:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not update project.") };
     }
 
     await deleteStorageImages([
       ...removedImagePaths(oldProject?.images, updates.images),
+      ...removedImagePaths(oldProject?.documents, updates.documents),
       ...removedReceiptPaths(oldProject?.expenses, updates.expenses),
     ]);
 
-    const mapped = mapProjectFromDb(data);
-    updateHome(activeHomeId, (home) => ({
-      ...home,
-      projects: home.projects.map((p) => (p.id === projectId ? mapped : p)),
-    }));
+    if (targetHomeId !== sourceHomeId) {
+      await reloadHomeData(sourceHomeId);
+      await reloadHomeData(targetHomeId);
+    } else {
+      await reloadHomeData(sourceHomeId);
+    }
+
+    return { ok: true };
   }
 
   async function deleteProject(projectId) {
@@ -616,6 +777,7 @@ export default function App({ session }) {
     const project = activeHome?.projects.find((p) => p.id === projectId);
     const paths = [
       ...collectImagePaths(project?.images),
+      ...collectImagePaths(project?.documents),
       ...collectImagePathsFromExpenses(project?.expenses),
     ];
 
@@ -732,20 +894,23 @@ export default function App({ session }) {
   }
 
   async function addContractor(newContractor) {
-    const userId = session?.user?.id;
-    if (!userId) return;
+    if (!session?.user?.id) {
+      return { ok: false, error: "Sign in to add a contractor." };
+    }
 
     const name = trimRequired(newContractor.name);
-    if (!name) return;
+    if (!name) return { ok: false, error: "Contact name is required." };
 
     const email = trimOptional(newContractor.email);
-    if (email && !isValidEmail(email)) return;
+    if (email && !isValidEmail(email)) {
+      return { ok: false, error: "Enter a valid email address." };
+    }
 
     const trade = trimRequired(newContractor.trade);
-    if (!trade) return;
+    if (!trade) return { ok: false, error: "Choose a trade." };
 
     const payload = {
-      user_id: userId,
+      user_id: session.user.id,
       name,
       company: trimOptional(newContractor.company),
       trade,
@@ -771,7 +936,7 @@ export default function App({ session }) {
 
     if (error) {
       console.error("Error adding contractor:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not save contractor.") };
     }
 
     setContractors((prev) => [...prev, {
@@ -791,20 +956,24 @@ export default function App({ session }) {
       notes: data.notes,
     }]);
     setEditingContractor(null);
+    return { ok: true };
   }
 
   async function editContractor(contractorId, updates) {
-    const userId = session?.user?.id;
-    if (!userId || !contractorId) return;
+    if (!session?.user?.id || !contractorId) {
+      return { ok: false, error: "Could not update contractor." };
+    }
 
     const name = trimRequired(updates.name);
-    if (!name) return;
+    if (!name) return { ok: false, error: "Contact name is required." };
 
     const email = trimOptional(updates.email);
-    if (email && !isValidEmail(email)) return;
+    if (email && !isValidEmail(email)) {
+      return { ok: false, error: "Enter a valid email address." };
+    }
 
     const trade = trimRequired(updates.trade);
-    if (!trade) return;
+    if (!trade) return { ok: false, error: "Choose a trade." };
 
     const oldContractor = contractors.find((c) => c.id === contractorId);
     const newCoiImage = imageForDb(updates.coiImage);
@@ -831,11 +1000,11 @@ export default function App({ session }) {
       .from("contractors")
       .update(sanitized)
       .eq("id", contractorId)
-      .eq("user_id", userId);
+      .eq("user_id", session.user.id);
 
     if (error) {
       console.error("Error updating contractor:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not update contractor.") };
     }
 
     if (oldContractor?.coiImage?.path && oldContractor.coiImage.path !== newCoiImage?.path) {
@@ -860,6 +1029,7 @@ export default function App({ session }) {
         notes: sanitized.notes,
       } : c))
     );
+    return { ok: true };
   }
 
   async function deleteContractor(contractorId) {
@@ -904,20 +1074,26 @@ export default function App({ session }) {
   }
 
   async function addWarranty(newWarranty) {
-    const userId = session?.user?.id;
-    if (!userId || !activeHomeId) return;
+    if (!session?.user?.id || !activeHomeId) {
+      return { ok: false, error: "No active property selected." };
+    }
 
     const name = trimRequired(newWarranty.name);
-    if (!name) return;
+    if (!name) return { ok: false, error: "Purchase name is required." };
+
+    if (imagesStillUploading(newWarranty.images) || filesStillUploading(newWarranty.documents)) {
+      return { ok: false, error: "Wait for files to finish uploading before saving." };
+    }
 
     const contractorId = newWarranty.contractorId || null;
-    if (contractorId && !contractors.some((c) => c.id === contractorId)) return;
+    if (contractorId && !contractors.some((c) => c.id === contractorId)) {
+      return { ok: false, error: "Selected contractor is no longer available." };
+    }
 
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from("warranties")
       .insert({
         home_id: activeHomeId,
-        user_id: userId,
         name,
         manufacturer: trimOptional(newWarranty.manufacturer),
         model: trimOptional(newWarranty.model),
@@ -935,31 +1111,35 @@ export default function App({ session }) {
         contractor_id: contractorId,
         notes: trimOptional(newWarranty.notes),
         images: imagesForDb(newWarranty.images),
-      })
-      .select()
-      .single();
+        documents: documentsForDb(newWarranty.documents),
+      });
 
     if (error) {
       console.error("Error adding warranty:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not save purchase.") };
     }
 
-    updateHome(activeHomeId, (home) => ({
-      ...home,
-      warranties: [...(home.warranties || []), mapWarrantyFromDb(data)],
-    }));
+    await reloadActiveHomeData();
     setEditingWarranty(null);
+    return { ok: true };
   }
 
   async function editWarranty(warrantyId, updates) {
-    const userId = session?.user?.id;
-    if (!userId || !warrantyId) return;
+    if (!session?.user?.id || !warrantyId) {
+      return { ok: false, error: "Could not update purchase." };
+    }
 
     const name = trimRequired(updates.name);
-    if (!name) return;
+    if (!name) return { ok: false, error: "Purchase name is required." };
+
+    if (imagesStillUploading(updates.images) || filesStillUploading(updates.documents)) {
+      return { ok: false, error: "Wait for files to finish uploading before saving." };
+    }
 
     const contractorId = updates.contractorId || null;
-    if (contractorId && !contractors.some((c) => c.id === contractorId)) return;
+    if (contractorId && !contractors.some((c) => c.id === contractorId)) {
+      return { ok: false, error: "Selected contractor is no longer available." };
+    }
 
     const oldWarranty = activeHome?.warranties?.find((w) => w.id === warrantyId);
 
@@ -981,28 +1161,27 @@ export default function App({ session }) {
       contractor_id: contractorId,
       notes: trimOptional(updates.notes),
       images: imagesForDb(updates.images),
+      documents: documentsForDb(updates.documents),
     };
 
-    const { data, error } = await supabase
+    const { error } = await supabase
       .from("warranties")
       .update(sanitized)
       .eq("id", warrantyId)
-      .eq("user_id", userId)
-      .select()
-      .single();
+      .eq("user_id", session.user.id);
 
     if (error) {
       console.error("Error updating warranty:", error);
-      return;
+      return { ok: false, error: saveErrorMessage(error, "Could not update purchase.") };
     }
 
-    await deleteStorageImages(removedImagePaths(oldWarranty?.images, updates.images));
+    await deleteStorageImages([
+      ...removedImagePaths(oldWarranty?.images, updates.images),
+      ...removedImagePaths(oldWarranty?.documents, updates.documents),
+    ]);
 
-    const mapped = mapWarrantyFromDb(data);
-    updateHome(activeHomeId, (home) => ({
-      ...home,
-      warranties: (home.warranties || []).map((w) => (w.id === warrantyId ? mapped : w)),
-    }));
+    await reloadActiveHomeData();
+    return { ok: true };
   }
 
   async function deleteWarranty(warrantyId) {
@@ -1010,7 +1189,10 @@ export default function App({ session }) {
     if (!userId || !warrantyId) return;
 
     const warranty = activeHome?.warranties?.find((w) => w.id === warrantyId);
-    const paths = collectImagePaths(warranty?.images);
+    const paths = [
+      ...collectImagePaths(warranty?.images),
+      ...collectImagePaths(warranty?.documents),
+    ];
 
     const { error } = await supabase
       .from("warranties")
@@ -1183,6 +1365,27 @@ export default function App({ session }) {
     );
   }
 
+  function openAddContractorModal() {
+    setEditingContractor("new");
+    setShowSettings(false);
+  }
+
+  const contractorModal = editingContractor ? (
+    <AddContractorModal
+      tradeOptions={tradeOptions}
+      initial={editingContractor === "new" ? null : editingContractor}
+      onClose={() => setEditingContractor(null)}
+      onSave={async (data) => {
+        if (editingContractor === "new") {
+          return addContractor(data);
+        }
+        const result = await editContractor(editingContractor.id, data);
+        if (result?.ok !== false) setEditingContractor(null);
+        return result;
+      }}
+    />
+  ) : null;
+
   if (!activeHome) return (
     <div data-theme={theme} style={{ minHeight: "100vh", background: "var(--bg)", fontFamily: "Inter, system-ui, sans-serif" }}>
       <style>{`
@@ -1217,7 +1420,7 @@ export default function App({ session }) {
         contractors={contractors}
         tasks={homes.flatMap((h) => h.tasks || [])}
         projects={homes.flatMap((h) => h.projects || [])}
-        onAddContractor={() => setEditingContractor("new")}
+        onAddContractor={openAddContractorModal}
         onEditContractor={(c) => {
           setEditingContractor(c);
           setShowSettings(false);
@@ -1226,6 +1429,7 @@ export default function App({ session }) {
         onClose={() => setShowSettings(false)}
       />
     )}
+      {contractorModal}
   </div>
 );
 
@@ -1348,29 +1552,62 @@ export default function App({ session }) {
         </div>
       </header>
 
-      {/* Home switcher */}
-      <div
-        style={{
-          background: "var(--surface)",
-          borderBottom: "1px solid var(--border)",
-          padding: "12px 24px",
-        }}
-      >
+      <main style={{ maxWidth: 920, margin: "0 auto", padding: "28px 24px 80px" }}>
+        {/* Property header with inline switcher */}
         <div
           style={{
-            maxWidth: 920,
-            margin: "0 auto",
+            marginBottom: 24,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 14,
+            flexWrap: "wrap",
           }}
         >
+          <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0, flex: "1 1 200px" }}>
+            {activeHome.image && (
+              <StorageImage
+                image={activeHome.image}
+                alt={activeHome.image.name}
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: 10,
+                  objectFit: "cover",
+                  border: "1px solid var(--border)",
+                  flexShrink: 0,
+                }}
+              />
+            )}
+            <div style={{ minWidth: 0 }}>
+              <h1
+                style={{
+                  fontFamily: "'Source Serif 4', serif",
+                  fontSize: 28,
+                  fontWeight: 600,
+                  margin: "0 0 4px",
+                }}
+              >
+                {activeHome.name}
+              </h1>
+              {activeHome.address && (
+                <p style={{ margin: 0, fontSize: 14, color: "var(--text-muted)" }}>
+                  {activeHome.address}
+                </p>
+              )}
+            </div>
+          </div>
           <select
             value={activeHomeId}
             onChange={(e) => setActiveHomeId(e.target.value)}
+            aria-label="Switch property"
             style={{
               ...inputStyle,
               marginBottom: 0,
               width: "auto",
-              minWidth: 220,
+              minWidth: 140,
               maxWidth: "100%",
+              flexShrink: 0,
               fontWeight: 500,
               borderColor: homes.find((h) => h.id === activeHomeId)?.color,
             }}
@@ -1379,41 +1616,6 @@ export default function App({ session }) {
               <option key={home.id} value={home.id}>{home.name}</option>
             ))}
           </select>
-        </div>
-      </div>
-
-      <main style={{ maxWidth: 920, margin: "0 auto", padding: "28px 24px 80px" }}>
-        {/* Home info strip */}
-        <div style={{ marginBottom: 24, display: "flex", alignItems: "center", gap: 14 }}>
-          {activeHome.image && (
-            <StorageImage
-              image={activeHome.image}
-              alt={activeHome.image.name}
-              style={{
-                width: 56,
-                height: 56,
-                borderRadius: 10,
-                objectFit: "cover",
-                border: "1px solid var(--border)",
-                flexShrink: 0,
-              }}
-            />
-          )}
-          <div>
-            <h1
-              style={{
-                fontFamily: "'Source Serif 4', serif",
-                fontSize: 28,
-                fontWeight: 600,
-                margin: "0 0 4px",
-              }}
-            >
-              {activeHome.name}
-            </h1>
-            <p style={{ margin: 0, fontSize: 14, color: "var(--text-muted)" }}>
-              {activeHome.address}
-            </p>
-          </div>
         </div>
 
         {/* View tabs */}
@@ -1434,8 +1636,8 @@ export default function App({ session }) {
           <ViewTab
             active={view === "warranties"}
             onClick={() => setView("warranties")}
-            icon={Shield}
-            label="Warranties"
+            icon={ShoppingBag}
+            label="Purchases"
           />
           <ViewTab
             active={view === "activity"}
@@ -1458,10 +1660,8 @@ export default function App({ session }) {
         {view === "projects" && (
           <ProjectsView
             projects={activeHome.projects}
-            contractors={contractors}
             onAddProject={() => setEditingProject("new")}
             onEditProject={(p) => setEditingProject(p)}
-            onDeleteProject={deleteProject}
           />
         )}
 
@@ -1487,6 +1687,7 @@ export default function App({ session }) {
       {/* Modals */}
       {showAddTask && (
         <AddTaskModal
+          homeId={activeHomeId}
           contractors={contractors}
           taskLibrary={taskLibrary}
           existingTasks={activeHome.tasks}
@@ -1497,17 +1698,28 @@ export default function App({ session }) {
       )}
       {editingProject && (
         <AddProjectModal
+          homeId={activeHomeId}
+          homes={homes}
+          sourceHomeId={activeHomeId}
           contractors={contractors}
           initial={editingProject === "new" ? null : editingProject}
           onClose={() => setEditingProject(null)}
-          onSave={(data) => {
+          onSave={async (data) => {
             if (editingProject === "new") {
-              addProject(data);
-            } else {
-              editProject(editingProject.id, data);
-              setEditingProject(null);
+              return addProject(data);
             }
+            const result = await editProject(editingProject.id, data, activeHomeId);
+            if (result?.ok !== false) setEditingProject(null);
+            return result;
           }}
+          onDelete={
+            editingProject === "new"
+              ? undefined
+              : async () => {
+                  await deleteProject(editingProject.id);
+                  setEditingProject(null);
+                }
+          }
         />
       )}
  
@@ -1527,7 +1739,7 @@ export default function App({ session }) {
           contractors={contractors}
           tasks={homes.flatMap((h) => h.tasks)}
           projects={homes.flatMap((h) => h.projects)}
-          onAddContractor={() => setEditingContractor("new")}
+          onAddContractor={openAddContractorModal}
           onEditContractor={(c) => {
             setEditingContractor(c);
             setShowSettings(false);
@@ -1535,35 +1747,22 @@ export default function App({ session }) {
           onDeleteContractor={deleteContractor}
           onClose={() => setShowSettings(false)}
         />
-      )}     
-      {editingContractor && (
-        <AddContractorModal
-          tradeOptions={tradeOptions}
-          initial={editingContractor === "new" ? null : editingContractor}
-          onClose={() => setEditingContractor(null)}
-          onSave={(data) => {
-            if (editingContractor === "new") {
-              addContractor(data);
-            } else {
-              editContractor(editingContractor.id, data);
-              setEditingContractor(null);
-            }
-          }}
-        />
       )}
+      {contractorModal}
       {editingWarranty && (
         <AddWarrantyModal
+          homeId={activeHomeId}
           contractors={contractors}
           propertyName={activeHome.name}
           initial={editingWarranty === "new" ? null : editingWarranty}
           onClose={() => setEditingWarranty(null)}
-          onSave={(data) => {
+          onSave={async (data) => {
             if (editingWarranty === "new") {
-              addWarranty(data);
-            } else {
-              editWarranty(editingWarranty.id, data);
-              setEditingWarranty(null);
+              return addWarranty(data);
             }
+            const result = await editWarranty(editingWarranty.id, data);
+            if (result?.ok !== false) setEditingWarranty(null);
+            return result;
           }}
         />
       )}
@@ -1738,6 +1937,12 @@ function TaskRow({ task, contractor, completedContractors, allContractors, onMar
                 {task.images.length}
               </span>
             )}
+            {task.documents && task.documents.length > 0 && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11, fontWeight: 400, color: "var(--text-muted)" }}>
+                <FileText size={12} />
+                {task.documents.length}
+              </span>
+            )}
           </div>
           {history.length > 0 && (
             <button
@@ -1877,6 +2082,7 @@ function TaskRow({ task, contractor, completedContractors, allContractors, onMar
           <StatusIcon size={13} />
           {dueText}
         </div>
+        <DocumentListDisplay documents={task.documents} />
       </div>
       {expanded && history.length > 0 && (
         <div style={{ padding: "0 18px 14px 40px" }}>
@@ -2072,7 +2278,7 @@ function ActivityView({ tasks, projects, contractors }) {
 }
 
 
-function ProjectsView({ projects, contractors, onAddProject, onEditProject, onDeleteProject }) {
+function ProjectsView({ projects, onAddProject, onEditProject }) {
   return (
     <div>
       <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
@@ -2085,14 +2291,12 @@ function ProjectsView({ projects, contractors, onAddProject, onEditProject, onDe
           body="Record home improvement projects, including any paint colors used, so you can find them again later."
         />
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {projects.map((project) => (
             <ProjectCard
               key={project.id}
               project={project}
-              contractors={contractors.filter((c) => (project.contractorIds || []).includes(c.id))}
-              onEdit={() => onEditProject(project)}
-              onDelete={() => onDeleteProject(project.id)}
+              onOpen={() => onEditProject(project)}
             />
           ))}
         </div>
@@ -2101,175 +2305,48 @@ function ProjectsView({ projects, contractors, onAddProject, onEditProject, onDe
   );
 }
 
-function ProjectCard({ project, contractors, onEdit, onDelete }) {
-  const [confirmDelete, setConfirmDelete] = useState(false);
+function ProjectCard({ project, onOpen }) {
+  const totalCost = (project.expenses || []).reduce(
+    (sum, expense) => sum + (Number(expense.amount) || 0),
+    0
+  );
 
   return (
-    <div
+    <button
+      type="button"
+      onClick={onOpen}
       style={{
+        display: "block",
+        width: "100%",
+        textAlign: "left",
         background: "var(--surface)",
         border: "1px solid var(--border)",
         borderRadius: 12,
-        padding: "16px 18px",
+        padding: "12px 16px",
+        cursor: "pointer",
+        font: "inherit",
+        color: "inherit",
       }}
     >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
         <h3
           style={{
             fontFamily: "'Source Serif 4', serif",
-            fontSize: 17,
+            fontSize: 16,
             fontWeight: 600,
             margin: 0,
+            minWidth: 0,
+            flex: 1,
           }}
         >
           {project.title}
         </h3>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", flexShrink: 0, gap: 2 }}>
           <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{formatDate(project.date)}</span>
-          <div style={{ display: "flex", gap: 6 }}>
-            {confirmDelete ? (
-              <>
-                <button
-                  onClick={onDelete}
-                  title="Confirm delete"
-                  style={{
-                    ...iconButtonStyle,
-                    width: "auto",
-                    padding: "0 10px",
-                    border: "1px solid #A32D2D",
-                    background: "#A32D2D",
-                    color: "#FFFFFF",
-                    fontSize: 12,
-                    fontWeight: 500,
-                  }}
-                >
-                  Delete
-                </button>
-                <button onClick={() => setConfirmDelete(false)} title="Cancel" style={iconButtonStyle}>
-                  <X size={12} />
-                </button>
-              </>
-            ) : (
-              <>
-                <button onClick={onEdit} title="Edit" style={iconButtonStyle}>
-                  <Settings size={12} />
-                </button>
-                <button onClick={() => setConfirmDelete(true)} title="Delete" style={iconButtonStyle}>
-                  <X size={12} />
-                </button>
-              </>
-            )}
-          </div>
+          <span style={{ fontSize: 14, fontWeight: 500 }}>{formatCurrency(totalCost)}</span>
         </div>
       </div>
-      {contractors.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
-          {contractors.map((c) => (
-            <div
-              key={c.id}
-              style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-muted)", border: "1px solid var(--subtle)", borderRadius: 6, padding: "3px 8px" }}
-            >
-              <User size={12} />
-              {contractorLabel(c)}{c.company && c.name ? ` · ${c.name}` : ""}
-            </div>
-          ))}
-        </div>
-      )}
-      {project.notes && (
-        <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 12px", lineHeight: 1.6 }}>
-          {project.notes}
-        </p>
-      )}
-      {project.paints.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: project.notes ? 0 : 4 }}>
-          {project.paints.map((paint, i) => (
-            <div
-              key={i}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                border: "1px solid var(--subtle)",
-                borderRadius: 8,
-                padding: "6px 10px 6px 6px",
-              }}
-            >
-              <span
-                style={{
-                  width: 24,
-                  height: 24,
-                  borderRadius: 6,
-                  background: paint.hex,
-                  border: "1px solid rgba(0,0,0,0.08)",
-                  flexShrink: 0,
-                }}
-              />
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 500 }}>{paint.name}</div>
-                <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  {paint.location} · {paint.hex}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-      {project.images && project.images.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
-          {project.images.map((img) => (
-            <StorageImage
-              key={img.id}
-              image={img}
-              alt={img.name}
-              style={{
-                width: 64,
-                height: 64,
-                borderRadius: 8,
-                objectFit: "cover",
-                border: "1px solid var(--subtle)",
-                flexShrink: 0,
-              }}
-            />
-          ))}
-        </div>
-      )}
-      {project.expenses && project.expenses.length > 0 && (
-        <div
-          style={{
-            marginTop: 12,
-            paddingTop: 10,
-            borderTop: "1px solid var(--subtle)",
-          }}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-            <div style={{ fontSize: 11, fontWeight: 500, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.03em" }}>
-              Expenses
-            </div>
-            <div style={{ fontSize: 13, fontWeight: 500 }}>
-              {formatCurrency(project.expenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0))}
-            </div>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {project.expenses.map((expense) => (
-              <div key={expense.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text-secondary)" }}>
-                {expense.receipt && (
-                  <StorageImage
-                    image={expense.receipt}
-                    alt={expense.receipt.name}
-                    style={{ width: 24, height: 24, borderRadius: 4, objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }}
-                  />
-                )}
-                <span style={{ flex: 1, minWidth: 0 }}>
-                  {expense.description || expense.category}
-                  <span style={{ color: "var(--text-muted)" }}> · {expense.category}</span>
-                </span>
-                <span style={{ flexShrink: 0 }}>{formatCurrency(expense.amount)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
+    </button>
   );
 }
 
@@ -2791,7 +2868,7 @@ function ExpenseEditor({ expenses, onChange }) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
     const uploaded = await uploadImage(file, "receipts");
-    if (uploaded) {
+    if (uploaded?.path) {
       updateExpense(id, "receipt", { ...uploaded, preview: URL.createObjectURL(file) });
     }
     e.target.value = "";
@@ -2907,6 +2984,9 @@ function ExpenseEditor({ expenses, onChange }) {
 
 
 function ImageUploadGrid({ images, onChange, uploadFolder }) {
+  const [uploadError, setUploadError] = useState("");
+  const [uploadNotice, setUploadNotice] = useState("");
+
   async function handleFiles(e) {
     const files = Array.from(e.target.files || []);
     e.target.value = "";
@@ -2914,16 +2994,22 @@ function ImageUploadGrid({ images, onChange, uploadFolder }) {
     for (const file of files) {
       const tempId = newImageId();
       const preview = URL.createObjectURL(file);
+      setUploadError("");
+      setUploadNotice("");
       onChange((prev) => [...prev, { id: tempId, name: file.name, preview, uploading: true }]);
 
       const uploaded = await uploadImage(file, uploadFolder);
-      if (uploaded) {
+      if (uploaded?.path) {
         onChange((prev) =>
           prev.map((img) => (img.id === tempId ? { ...uploaded, preview } : img))
         );
+        if (uploaded.compressed) {
+          setUploadNotice("Large photo was resized automatically to fit the 5 MB limit.");
+        }
       } else {
         URL.revokeObjectURL(preview);
         onChange((prev) => prev.filter((img) => img.id !== tempId));
+        setUploadError(uploaded?.error || imageUploadErrorMessage(file, null));
       }
     }
   }
@@ -3009,29 +3095,187 @@ function ImageUploadGrid({ images, onChange, uploadFolder }) {
           Add
           <input
             type="file"
-            accept="image/jpeg,image/png,image/webp"
+            accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif"
             multiple
             onChange={handleFiles}
             style={{ display: "none" }}
           />
         </label>
       </div>
+      {uploadNotice && (
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "8px 0 0" }}>
+          {uploadNotice}
+        </p>
+      )}
+      {uploadError && (
+        <p style={{ fontSize: 12, color: "#A32D2D", margin: uploadNotice ? "4px 0 0" : "8px 0 0" }}>
+          {uploadError}
+        </p>
+      )}
     </div>
   );
 }
 
 
-function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave, onAddLibraryTask }) {
-  const [mode, setMode] = useState("library"); // 'library' | 'custom'
-  const [title, setTitle] = useState("");
-  const [category, setCategory] = useState("HVAC");
-  const [frequencyMonths, setFrequencyMonths] = useState(6);
-  const [contractorId, setContractorId] = useState("");
-  const [images, setImages] = useState([]);
-  const [libraryTaskId, setLibraryTaskId] = useState("");
+function DocumentUploadList({ documents, onChange, uploadFolder }) {
+  async function handleFiles(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+
+    for (const file of files) {
+      const tempId = newDocumentId();
+      onChange((prev) => [...prev, { id: tempId, name: file.name, mimeType: file.type, uploading: true }]);
+
+      const uploaded = await uploadDocument(file, uploadFolder);
+      if (uploaded) {
+        onChange((prev) => prev.map((doc) => (doc.id === tempId ? uploaded : doc)));
+      } else {
+        onChange((prev) => prev.filter((doc) => doc.id !== tempId));
+      }
+    }
+  }
+
+  function removeDocument(id) {
+    const doc = documents.find((d) => d.id === id);
+    if (doc?.path) deleteStorageDocuments([doc.path]);
+    onChange((prev) => prev.filter((d) => d.id !== id));
+  }
+
+  return (
+    <div style={{ marginBottom: 14 }}>
+      {documents.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
+          {documents.map((doc) => (
+            <div
+              key={doc.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+              }}
+            >
+              <FileText size={16} color="var(--text-muted)" style={{ flexShrink: 0 }} />
+              <span
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  fontSize: 13,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {doc.name}
+              </span>
+              {doc.uploading && (
+                <span style={{ fontSize: 11, color: "var(--text-muted)", flexShrink: 0 }}>Uploading…</span>
+              )}
+              <button
+                onClick={() => removeDocument(doc.id)}
+                title="Remove document"
+                disabled={doc.uploading}
+                style={{
+                  width: 24,
+                  height: 24,
+                  borderRadius: 6,
+                  border: "none",
+                  background: "rgba(44,44,42,0.08)",
+                  color: "var(--text-secondary)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: 0,
+                  flexShrink: 0,
+                  opacity: doc.uploading ? 0.5 : 1,
+                }}
+              >
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <label
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          padding: "8px 12px",
+          borderRadius: 8,
+          border: "1px dashed var(--border)",
+          background: "var(--subtle)",
+          color: "var(--text-secondary)",
+          fontSize: 13,
+          cursor: "pointer",
+        }}
+      >
+        <FileText size={16} />
+        Add PDF
+        <input
+          type="file"
+          accept="application/pdf"
+          multiple
+          onChange={handleFiles}
+          style={{ display: "none" }}
+        />
+      </label>
+    </div>
+  );
+}
+
+
+function DocumentListDisplay({ documents }) {
+  if (!documents || documents.length === 0) return null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
+      {documents.map((doc) => (
+        <StorageDocument key={doc.id} document={doc} />
+      ))}
+    </div>
+  );
+}
+
+
+function AddTaskModal({ homeId, contractors, taskLibrary, existingTasks, onClose, onSave, onAddLibraryTask }) {
+  const draftKey = homeId ? `task:${homeId}` : null;
+
+  const [mode, setMode] = useState(() => readFormDraft(draftKey)?.mode ?? "library");
+  const [title, setTitle] = useState(() => readFormDraft(draftKey)?.title ?? "");
+  const [category, setCategory] = useState(() => readFormDraft(draftKey)?.category ?? "HVAC");
+  const [frequencyMonths, setFrequencyMonths] = useState(() => readFormDraft(draftKey)?.frequencyMonths ?? 6);
+  const [contractorId, setContractorId] = useState(() => readFormDraft(draftKey)?.contractorId ?? "");
+  const [images, setImages] = useState(() => readFormDraft(draftKey)?.images ?? []);
+  const [documents, setDocuments] = useState(() => readFormDraft(draftKey)?.documents ?? []);
+  const [libraryTaskId, setLibraryTaskId] = useState(() => readFormDraft(draftKey)?.libraryTaskId ?? "");
   const [error, setError] = useState("");
-  const [nextDue, setNextDue] = useState("");
-  const [saveToLibrary, setSaveToLibrary] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [nextDue, setNextDue] = useState(() => readFormDraft(draftKey)?.nextDue ?? "");
+  const [saveToLibrary, setSaveToLibrary] = useState(() => readFormDraft(draftKey)?.saveToLibrary ?? true);
+  const [draftRestored] = useState(() => {
+    const draft = readFormDraft(draftKey);
+    return !!(draft && (draft.title || draft.libraryTaskId || draft.nextDue || draft.contractorId));
+  });
+
+  useEffect(() => {
+    if (!draftKey) return;
+    writeFormDraft(draftKey, {
+      mode,
+      title,
+      category,
+      frequencyMonths,
+      contractorId,
+      images: imagesForDraft(images),
+      documents: documentsForDraft(documents),
+      libraryTaskId,
+      nextDue,
+      saveToLibrary,
+    });
+  }, [draftKey, mode, title, category, frequencyMonths, contractorId, images, documents, libraryTaskId, nextDue, saveToLibrary]);
 
   const sortedLibrary = [...taskLibrary].sort((a, b) => a.title.localeCompare(b.title));
   const selectedLibraryItem = taskLibrary.find((t) => t.id === libraryTaskId);
@@ -3054,61 +3298,89 @@ function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave
     );
   }
 
-  function handleSave() {
+  async function handleSave() {
+    setError("");
+
+    if (imagesStillUploading(images) || filesStillUploading(documents)) {
+      setError("Wait for files to finish uploading before saving.");
+      return;
+    }
+
+    setSaving(true);
+    let result;
+
     if (mode === "library") {
       if (!selectedLibraryItem) {
         setError("Choose a task from the library, or switch to adding a custom task.");
+        setSaving(false);
         return;
       }
       if (checkDuplicate(selectedLibraryItem.title)) {
         setError(`"${selectedLibraryItem.title}" is already on this property's maintenance list.`);
+        setSaving(false);
         return;
       }
-      onSave({
+      result = await onSave({
         title: selectedLibraryItem.title.trim(),
         category: selectedLibraryItem.category,
         frequencyMonths: Number(selectedLibraryItem.frequencyMonths),
         contractorId: contractorId || null,
         images,
+        documents,
         nextDue: nextDue || null,
       });
-      return;
-    }
-
-    // Custom mode
-    const trimmed = title.trim();
-    if (!trimmed) return;
-
-    if (checkDuplicate(trimmed)) {
-      setError(`"${trimmed}" is already on this property's maintenance list.`);
-      return;
-    }
-
-    if (saveToLibrary && onAddLibraryTask) {
-      const alreadyInLibrary = taskLibrary.some(
-        (t) => t.title.trim().toLowerCase() === trimmed.toLowerCase()
-      );
-      if (!alreadyInLibrary) {
-        onAddLibraryTask({
-          title: trimmed,
-          category,
-          frequencyMonths: Number(frequencyMonths),
-        });
+    } else {
+      const trimmed = title.trim();
+      if (!trimmed) {
+        setSaving(false);
+        return;
       }
+
+      if (checkDuplicate(trimmed)) {
+        setError(`"${trimmed}" is already on this property's maintenance list.`);
+        setSaving(false);
+        return;
+      }
+
+      if (saveToLibrary && onAddLibraryTask) {
+        const alreadyInLibrary = taskLibrary.some(
+          (t) => t.title.trim().toLowerCase() === trimmed.toLowerCase()
+        );
+        if (!alreadyInLibrary) {
+          onAddLibraryTask({
+            title: trimmed,
+            category,
+            frequencyMonths: Number(frequencyMonths),
+          });
+        }
+      }
+
+      result = await onSave({
+        title: trimmed,
+        category,
+        frequencyMonths: Number(frequencyMonths),
+        contractorId: contractorId || null,
+        images,
+        documents,
+        nextDue: nextDue || null,
+      });
     }
 
-    onSave({
-      title: trimmed,
-      category,
-      frequencyMonths: Number(frequencyMonths),
-      contractorId: contractorId || null,
-      images,
-      nextDue: nextDue || null,
-    });
+    setSaving(false);
+    if (result?.ok === false) {
+      setError(result.error || "Could not save task.");
+    } else {
+      clearFormDraft(draftKey);
+    }
   }
 
   return (
     <Modal title="Add maintenance task" onClose={onClose}>
+      {draftRestored && (
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px", lineHeight: 1.5 }}>
+          Restored your unsaved draft.
+        </p>
+      )}
       {mode === "library" ? (
         <>
           {taskLibrary.length === 0 ? (
@@ -3166,11 +3438,13 @@ function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave
               </select>
               <label style={labelStyle}>Photos</label>
               <ImageUploadGrid images={images} onChange={setImages} uploadFolder="tasks" />
+              <label style={labelStyle}>Documents</label>
+              <DocumentUploadList documents={documents} onChange={setDocuments} uploadFolder="tasks" />
             </>
           )}
 
-          <button style={saveButtonStyle} onClick={handleSave}>
-            Add task
+          <button style={saveButtonStyle} onClick={handleSave} disabled={saving}>
+            {saving ? "Saving..." : "Add task"}
           </button>
 
           {!selectedLibraryItem && (
@@ -3253,6 +3527,8 @@ function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave
           </select>
           <label style={labelStyle}>Photos</label>
           <ImageUploadGrid images={images} onChange={setImages} uploadFolder="tasks" />
+          <label style={labelStyle}>Documents</label>
+          <DocumentUploadList documents={documents} onChange={setDocuments} uploadFolder="tasks" />
 
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text-secondary)", marginBottom: 14, cursor: "pointer" }}>
             <input
@@ -3264,8 +3540,8 @@ function AddTaskModal({ contractors, taskLibrary, existingTasks, onClose, onSave
             Save this as a reusable task in the task library
           </label>
 
-          <button style={saveButtonStyle} onClick={handleSave}>
-            Add task
+          <button style={saveButtonStyle} onClick={handleSave} disabled={saving}>
+            {saving ? "Saving..." : "Add task"}
           </button>
 
           {taskLibrary.length > 0 && (
@@ -3378,14 +3654,45 @@ function CompleteTaskModal({ task, contractors, onClose, onSave }) {
 }
 
 
-function AddProjectModal({ contractors, initial, onClose, onSave }) {
-  const [title, setTitle] = useState(initial?.title || "");
-  const [date, setDate] = useState(initial?.date || TODAY.toISOString().split("T")[0]);
-  const [notes, setNotes] = useState(initial?.notes || "");
-  const [paints, setPaints] = useState(initial?.paints || []);
-  const [contractorIds, setContractorIds] = useState(initial?.contractorIds || []);
-  const [images, setImages] = useState(initial?.images || []);
-  const [expenses, setExpenses] = useState(initial?.expenses || []);
+function AddProjectModal({ homeId, homes, sourceHomeId, contractors, initial, onClose, onSave, onDelete }) {
+  const isNew = !initial;
+  const draftKey = isNew && homeId ? `project:${homeId}` : null;
+  const savedDraft = isNew ? readFormDraft(draftKey) : null;
+
+  const [projectHomeId, setProjectHomeId] = useState(() => sourceHomeId ?? homeId ?? "");
+  const [title, setTitle] = useState(() => savedDraft?.title ?? initial?.title ?? "");
+  const [date, setDate] = useState(() => savedDraft?.date ?? initial?.date ?? TODAY.toISOString().split("T")[0]);
+  const [notes, setNotes] = useState(() => savedDraft?.notes ?? initial?.notes ?? "");
+  const [paints, setPaints] = useState(() => savedDraft?.paints ?? initial?.paints ?? []);
+  const [contractorIds, setContractorIds] = useState(() => savedDraft?.contractorIds ?? initial?.contractorIds ?? []);
+  const [images, setImages] = useState(() => savedDraft?.images ?? initial?.images ?? []);
+  const [documents, setDocuments] = useState(() => savedDraft?.documents ?? initial?.documents ?? []);
+  const [expenses, setExpenses] = useState(() => savedDraft?.expenses ?? initial?.expenses ?? []);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [draftRestored] = useState(() => {
+    if (!savedDraft) return false;
+    return !!(savedDraft.title || savedDraft.notes || savedDraft.paints?.length || savedDraft.contractorIds?.length);
+  });
+
+  useEffect(() => {
+    if (!draftKey) return;
+    writeFormDraft(draftKey, {
+      title,
+      date,
+      notes,
+      paints,
+      contractorIds,
+      images: imagesForDraft(images),
+      documents: documentsForDraft(documents),
+      expenses: expenses.map((e) => ({
+        ...e,
+        receipt: e.receipt ? imagesForDraft([e.receipt])[0] ?? null : null,
+      })),
+    });
+  }, [draftKey, title, date, notes, paints, contractorIds, images, documents, expenses]);
 
   function addPaintRow() {
     setPaints([...paints, { name: "", hex: "#CCCCCC", location: "" }]);
@@ -3399,21 +3706,64 @@ function AddProjectModal({ contractors, initial, onClose, onSave }) {
     setPaints(paints.filter((_, i) => i !== index));
   }
 
-  function handleSave() {
+  async function handleSave() {
     if (!title.trim()) return;
-    onSave({
+    setError("");
+
+    if (imagesStillUploading(images) || filesStillUploading(documents)) {
+      setError("Wait for files to finish uploading before saving.");
+      return;
+    }
+
+    setSaving(true);
+    const result = await onSave({
+      homeId: projectHomeId,
       title: title.trim(),
       date,
       notes: notes.trim(),
       paints: paints.filter((p) => p.name.trim()),
       contractorIds,
       images,
+      documents,
       expenses,
     });
+    setSaving(false);
+
+    if (result?.ok === false) {
+      setError(result.error || "Could not save project.");
+    } else {
+      clearFormDraft(draftKey);
+    }
+  }
+
+  async function handleDelete() {
+    if (!onDelete) return;
+    setDeleting(true);
+    await onDelete();
+    setDeleting(false);
   }
 
   return (
     <Modal title={initial ? "Edit project" : "Log a project"} onClose={onClose}>
+      {draftRestored && (
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px", lineHeight: 1.5 }}>
+          Restored your unsaved draft.
+        </p>
+      )}
+      {!isNew && homes.length > 1 && (
+        <>
+          <label style={labelStyle}>Property</label>
+          <select
+            style={inputStyle}
+            value={projectHomeId}
+            onChange={(e) => setProjectHomeId(e.target.value)}
+          >
+            {[...homes].sort((a, b) => a.name.localeCompare(b.name)).map((home) => (
+              <option key={home.id} value={home.id}>{home.name}</option>
+            ))}
+          </select>
+        </>
+      )}
       <label style={labelStyle}>Project title</label>
       <input
         style={inputStyle}
@@ -3504,12 +3854,84 @@ function AddProjectModal({ contractors, initial, onClose, onSave }) {
       <label style={labelStyle}>Photos</label>
       <ImageUploadGrid images={images} onChange={setImages} uploadFolder="projects" />
 
+      <label style={labelStyle}>Documents</label>
+      <DocumentUploadList documents={documents} onChange={setDocuments} uploadFolder="projects" />
+
       <label style={labelStyle}>Expenses</label>
       <ExpenseEditor expenses={expenses} onChange={setExpenses} />
 
-      <button style={saveButtonStyle} onClick={handleSave}>
-        {initial ? "Save changes" : "Save project"}
+      {error && (
+        <p style={{ fontSize: 12, color: "#A32D2D", margin: "0 0 14px" }}>
+          {error}
+        </p>
+      )}
+
+      <button style={saveButtonStyle} onClick={handleSave} disabled={saving || deleting}>
+        {saving ? "Saving..." : initial ? "Save changes" : "Save project"}
       </button>
+
+      {!isNew && onDelete && (
+        <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+          {confirmDelete ? (
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                type="button"
+                onClick={handleDelete}
+                disabled={deleting || saving}
+                style={{
+                  flex: 1,
+                  padding: "10px 16px",
+                  borderRadius: 8,
+                  border: "1px solid #A32D2D",
+                  background: "#A32D2D",
+                  color: "#FFFFFF",
+                  fontSize: 14,
+                  fontWeight: 500,
+                  cursor: deleting || saving ? "not-allowed" : "pointer",
+                  opacity: deleting || saving ? 0.7 : 1,
+                }}
+              >
+                {deleting ? "Deleting..." : "Confirm delete"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(false)}
+                disabled={deleting || saving}
+                style={{
+                  padding: "10px 16px",
+                  borderRadius: 8,
+                  border: "1px solid var(--border)",
+                  background: "var(--surface)",
+                  color: "var(--text-secondary)",
+                  fontSize: 14,
+                  cursor: deleting || saving ? "not-allowed" : "pointer",
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(true)}
+              disabled={saving || deleting}
+              style={{
+                width: "100%",
+                padding: "10px 16px",
+                borderRadius: 8,
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+                color: "#A32D2D",
+                fontSize: 14,
+                fontWeight: 500,
+                cursor: saving || deleting ? "not-allowed" : "pointer",
+              }}
+            >
+              Delete project
+            </button>
+          )}
+        </div>
+      )}
     </Modal>
   );
 }
@@ -3525,26 +3947,77 @@ const HOME_COLORS = ["#2F4A3E", "#C4644A", "#7F77DD", "#D4537E", "#378ADD", "#85
 // ============================================================================
 
 function AddContractorModal({ tradeOptions, initial, onClose, onSave }) {
-  const [name, setName] = useState(initial?.name || "");
-  const [company, setCompany] = useState(initial?.company || "");
-  const [trade, setTrade] = useState(initial?.trade || tradeOptions[0] || "General");
-  const [phoneMobile, setPhoneMobile] = useState(initial?.phoneMobile || "");
-  const [phoneOffice, setPhoneOffice] = useState(initial?.phoneOffice || "");
-  const [email, setEmail] = useState(initial?.email || "");
-  const [licenseNumber, setLicenseNumber] = useState(initial?.licenseNumber || "");
-  const [insuranceProvider, setInsuranceProvider] = useState(initial?.insuranceProvider || "");
-  const [insurancePolicyNumber, setInsurancePolicyNumber] = useState(initial?.insurancePolicyNumber || "");
-  const [insuranceExpires, setInsuranceExpires] = useState(initial?.insuranceExpires || "");
-  const [coiImage, setCoiImage] = useState(initial?.coiImage || null);
-  const [rating, setRating] = useState(initial?.rating || 0);
-  const [notes, setNotes] = useState(initial?.notes || "");
+  const isNew = !initial;
+  const draftKey = isNew ? "contractor:new" : null;
+  const savedDraft = isNew ? readFormDraft(draftKey) : null;
+
+  const [company, setCompany] = useState(() => savedDraft?.company ?? initial?.company ?? "");
+  const [name, setName] = useState(() => savedDraft?.name ?? initial?.name ?? "");
+  const [trade, setTrade] = useState(() => savedDraft?.trade ?? initial?.trade ?? "");
+  const [phoneMobile, setPhoneMobile] = useState(() => savedDraft?.phoneMobile ?? initial?.phoneMobile ?? "");
+  const [phoneOffice, setPhoneOffice] = useState(() => savedDraft?.phoneOffice ?? initial?.phoneOffice ?? "");
+  const [email, setEmail] = useState(() => savedDraft?.email ?? initial?.email ?? "");
+  const [licenseNumber, setLicenseNumber] = useState(() => savedDraft?.licenseNumber ?? initial?.licenseNumber ?? "");
+  const [insuranceProvider, setInsuranceProvider] = useState(() => savedDraft?.insuranceProvider ?? initial?.insuranceProvider ?? "");
+  const [insurancePolicyNumber, setInsurancePolicyNumber] = useState(() => savedDraft?.insurancePolicyNumber ?? initial?.insurancePolicyNumber ?? "");
+  const [insuranceExpires, setInsuranceExpires] = useState(() => savedDraft?.insuranceExpires ?? initial?.insuranceExpires ?? "");
+  const [coiImage, setCoiImage] = useState(() => savedDraft?.coiImage ?? initial?.coiImage ?? null);
+  const [rating, setRating] = useState(() => savedDraft?.rating ?? initial?.rating ?? 0);
+  const [notes, setNotes] = useState(() => savedDraft?.notes ?? initial?.notes ?? "");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [draftRestored] = useState(() => {
+    if (!savedDraft) return false;
+    return !!(
+      savedDraft.company ||
+      savedDraft.name ||
+      savedDraft.trade ||
+      savedDraft.phoneMobile ||
+      savedDraft.email ||
+      savedDraft.notes
+    );
+  });
+
+  useEffect(() => {
+    if (!draftKey) return;
+    writeFormDraft(draftKey, {
+      company,
+      name,
+      trade,
+      phoneMobile,
+      phoneOffice,
+      email,
+      licenseNumber,
+      insuranceProvider,
+      insurancePolicyNumber,
+      insuranceExpires,
+      coiImage: coiImage ? imagesForDraft([coiImage])[0] ?? null : null,
+      rating,
+      notes,
+    });
+  }, [
+    draftKey,
+    company,
+    name,
+    trade,
+    phoneMobile,
+    phoneOffice,
+    email,
+    licenseNumber,
+    insuranceProvider,
+    insurancePolicyNumber,
+    insuranceExpires,
+    coiImage,
+    rating,
+    notes,
+  ]);
 
   async function handleCoiUpload(e) {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
     if (coiImage?.path) await deleteStorageImage(coiImage.path);
     const uploaded = await uploadImage(file, "coi");
-    if (uploaded) {
+    if (uploaded?.path) {
       setCoiImage({ ...uploaded, preview: URL.createObjectURL(file) });
     }
     e.target.value = "";
@@ -3556,9 +4029,23 @@ function AddContractorModal({ tradeOptions, initial, onClose, onSave }) {
     setCoiImage(null);
   }
 
-  function handleSave() {
-    if (!name.trim()) return;
-    onSave({
+  async function handleSave() {
+    setError("");
+    if (!name.trim()) {
+      setError("Contact name is required.");
+      return;
+    }
+    if (!trade) {
+      setError("Choose a trade.");
+      return;
+    }
+    if (email.trim() && !isValidEmail(email.trim())) {
+      setError("Enter a valid email address.");
+      return;
+    }
+
+    setSaving(true);
+    const result = await onSave({
       name: name.trim(),
       company: company.trim(),
       trade,
@@ -3573,27 +4060,44 @@ function AddContractorModal({ tradeOptions, initial, onClose, onSave }) {
       rating,
       notes: notes.trim(),
     });
+    setSaving(false);
+
+    if (result?.ok === false) {
+      setError(result.error || "Could not save contractor.");
+    } else {
+      clearFormDraft(draftKey);
+    }
   }
 
   return (
     <Modal title={initial ? "Edit contractor" : "Add contractor"} onClose={onClose}>
-      <label style={labelStyle}>Name</label>
-      <input
-        style={inputStyle}
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="e.g. Mike Donnelly"
-        autoFocus
-      />
+      {draftRestored && (
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px", lineHeight: 1.5 }}>
+          Restored your unsaved draft.
+        </p>
+      )}
       <label style={labelStyle}>Company</label>
       <input
         style={inputStyle}
         value={company}
         onChange={(e) => setCompany(e.target.value)}
         placeholder="e.g. Donnelly Plumbing & Heating"
+        autoFocus
+      />
+      <label style={labelStyle}>Contact name</label>
+      <input
+        style={inputStyle}
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="e.g. Mike Donnelly"
       />
       <label style={labelStyle}>Trade</label>
-      <select style={inputStyle} value={trade} onChange={(e) => setTrade(e.target.value)}>
+      <select
+        style={{ ...inputStyle, borderColor: error && !trade ? "#A32D2D" : "var(--border)" }}
+        value={trade}
+        onChange={(e) => setTrade(e.target.value)}
+      >
+        <option value="">Choose a trade...</option>
         {sortWithOtherLast(tradeOptions).map((t) => (
           <option key={t} value={t}>{t}</option>
         ))}
@@ -3743,8 +4247,13 @@ function AddContractorModal({ tradeOptions, initial, onClose, onSave }) {
         onChange={(e) => setNotes(e.target.value)}
         placeholder="What did they do, would you hire them again..."
       />
-      <button style={saveButtonStyle} onClick={handleSave}>
-        {initial ? "Save changes" : "Add contractor"}
+      {error && (
+        <p style={{ fontSize: 12, color: "#A32D2D", margin: "0 0 14px" }}>
+          {error}
+        </p>
+      )}
+      <button style={saveButtonStyle} onClick={handleSave} disabled={saving}>
+        {saving ? "Saving..." : initial ? "Save changes" : "Add contractor"}
       </button>
     </Modal>
   );
@@ -4250,7 +4759,7 @@ function PropertyForm({ initial, onSave, onCancel, saveLabel }) {
     if (!file) return;
     if (image?.path) await deleteStorageImage(image.path);
     const uploaded = await uploadImage(file, "homes");
-    if (uploaded) {
+    if (uploaded?.path) {
       setImage({ ...uploaded, preview: URL.createObjectURL(file) });
     }
     e.target.value = "";
@@ -4398,13 +4907,13 @@ function WarrantiesView({ warranties, contractors, onAddWarranty, onEditWarranty
   return (
     <div>
       <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
-        <ActionButton onClick={onAddWarranty} icon={Plus} label="Add warranty" primary />
+        <ActionButton onClick={onAddWarranty} icon={Plus} label="Add purchase" primary />
       </div>
 
       {warranties.length === 0 ? (
         <EmptyState
-          title="No warranties saved yet"
-          body="Track appliance and installation warranties, including expiration dates and proof of purchase."
+          title="No purchases saved yet"
+          body="Track appliances, fixtures, and other purchases — including price, receipts, and coverage expiration dates."
         />
       ) : (
         <div
@@ -4581,6 +5090,7 @@ function WarrantyCard({ warranty, contractor, onEdit, onDelete }) {
           ))}
         </div>
       )}
+      <DocumentListDisplay documents={warranty.documents} />
     </div>
   );
 }
@@ -4589,24 +5099,86 @@ function WarrantyCard({ warranty, contractor, onEdit, onDelete }) {
 // ADD/EDIT WARRANTY MODAL
 // ============================================================================
 
-function AddWarrantyModal({ contractors, propertyName, initial, onClose, onSave }) {
-  const [name, setName] = useState(initial?.name || "");
-  const [manufacturer, setManufacturer] = useState(initial?.manufacturer || "");
-  const [model, setModel] = useState(initial?.model || "");
-  const [serialNumber, setSerialNumber] = useState(initial?.serialNumber || "");
-  const [purchasedFrom, setPurchasedFrom] = useState(initial?.purchasedFrom || "");
-  const [purchasePrice, setPurchasePrice] = useState(initial?.purchasePrice || "");
-  const [dateInstalled, setDateInstalled] = useState(initial?.dateInstalled || "");
-  const [dateExpires, setDateExpires] = useState(initial?.dateExpires || "");
-  const [provider, setProvider] = useState(initial?.provider || "");
-  const [providerContact, setProviderContact] = useState(initial?.providerContact || "");
-  const [contractorId, setContractorId] = useState(initial?.contractorId || "");
-  const [notes, setNotes] = useState(initial?.notes || "");
-  const [images, setImages] = useState(initial?.images || []);
+function AddWarrantyModal({ homeId, contractors, propertyName, initial, onClose, onSave }) {
+  const isNew = !initial;
+  const draftKey = isNew && homeId ? `warranty:${homeId}` : null;
+  const savedDraft = isNew ? readFormDraft(draftKey) : null;
 
-  function handleSave() {
+  const [name, setName] = useState(() => savedDraft?.name ?? initial?.name ?? "");
+  const [manufacturer, setManufacturer] = useState(() => savedDraft?.manufacturer ?? initial?.manufacturer ?? "");
+  const [model, setModel] = useState(() => savedDraft?.model ?? initial?.model ?? "");
+  const [serialNumber, setSerialNumber] = useState(() => savedDraft?.serialNumber ?? initial?.serialNumber ?? "");
+  const [purchasedFrom, setPurchasedFrom] = useState(() => savedDraft?.purchasedFrom ?? initial?.purchasedFrom ?? "");
+  const [purchasePrice, setPurchasePrice] = useState(() => savedDraft?.purchasePrice ?? initial?.purchasePrice ?? "");
+  const [dateInstalled, setDateInstalled] = useState(() => savedDraft?.dateInstalled ?? initial?.dateInstalled ?? "");
+  const [dateExpires, setDateExpires] = useState(() => savedDraft?.dateExpires ?? initial?.dateExpires ?? "");
+  const [provider, setProvider] = useState(() => savedDraft?.provider ?? initial?.provider ?? "");
+  const [providerContact, setProviderContact] = useState(() => savedDraft?.providerContact ?? initial?.providerContact ?? "");
+  const [contractorId, setContractorId] = useState(() => savedDraft?.contractorId ?? initial?.contractorId ?? "");
+  const [notes, setNotes] = useState(() => savedDraft?.notes ?? initial?.notes ?? "");
+  const [images, setImages] = useState(() => savedDraft?.images ?? initial?.images ?? []);
+  const [documents, setDocuments] = useState(() => savedDraft?.documents ?? initial?.documents ?? []);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [draftRestored] = useState(() => {
+    if (!savedDraft) return false;
+    return !!(
+      savedDraft.name ||
+      savedDraft.manufacturer ||
+      savedDraft.model ||
+      savedDraft.serialNumber ||
+      savedDraft.notes ||
+      savedDraft.provider
+    );
+  });
+
+  useEffect(() => {
+    if (!draftKey) return;
+    writeFormDraft(draftKey, {
+      name,
+      manufacturer,
+      model,
+      serialNumber,
+      purchasedFrom,
+      purchasePrice,
+      dateInstalled,
+      dateExpires,
+      provider,
+      providerContact,
+      contractorId,
+      notes,
+      images: imagesForDraft(images),
+      documents: documentsForDraft(documents),
+    });
+  }, [
+    draftKey,
+    name,
+    manufacturer,
+    model,
+    serialNumber,
+    purchasedFrom,
+    purchasePrice,
+    dateInstalled,
+    dateExpires,
+    provider,
+    providerContact,
+    contractorId,
+    notes,
+    images,
+    documents,
+  ]);
+
+  async function handleSave() {
     if (!name.trim()) return;
-    onSave({
+    setError("");
+
+    if (imagesStillUploading(images) || filesStillUploading(documents)) {
+      setError("Wait for files to finish uploading before saving.");
+      return;
+    }
+
+    setSaving(true);
+    const result = await onSave({
       name: name.trim(),
       manufacturer: manufacturer.trim(),
       model: model.trim(),
@@ -4620,11 +5192,24 @@ function AddWarrantyModal({ contractors, propertyName, initial, onClose, onSave 
       contractorId: contractorId || null,
       notes: notes.trim(),
       images,
+      documents,
     });
+    setSaving(false);
+
+    if (result?.ok === false) {
+      setError(result.error || "Could not save purchase.");
+    } else {
+      clearFormDraft(draftKey);
+    }
   }
 
   return (
-    <Modal title={initial ? "Edit warranty" : "Add warranty"} onClose={onClose}>
+    <Modal title={initial ? "Edit purchase" : "Add purchase"} onClose={onClose}>
+      {draftRestored && (
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px", lineHeight: 1.5 }}>
+          Restored your unsaved draft.
+        </p>
+      )}
       {propertyName && (
         <div
           style={{
@@ -4718,12 +5303,12 @@ function AddWarrantyModal({ contractors, propertyName, initial, onClose, onSave 
         </div>
       </div>
 
-      <label style={labelStyle}>Warranty provider</label>
+      <label style={labelStyle}>Coverage provider</label>
       <input
         style={inputStyle}
         value={provider}
         onChange={(e) => setProvider(e.target.value)}
-        placeholder="e.g. Moen Limited Lifetime Warranty"
+        placeholder="e.g. Moen Limited Lifetime Coverage"
       />
       <label style={labelStyle}>Provider contact (phone or website)</label>
       <input
@@ -4764,8 +5349,17 @@ function AddWarrantyModal({ contractors, propertyName, initial, onClose, onSave 
       <label style={labelStyle}>Photos</label>
       <ImageUploadGrid images={images} onChange={setImages} uploadFolder="warranties" />
 
-      <button style={saveButtonStyle} onClick={handleSave}>
-        {initial ? "Save changes" : "Add warranty"}
+      <label style={labelStyle}>Documents</label>
+      <DocumentUploadList documents={documents} onChange={setDocuments} uploadFolder="warranties" />
+
+      {error && (
+        <p style={{ fontSize: 12, color: "#A32D2D", margin: "0 0 14px" }}>
+          {error}
+        </p>
+      )}
+
+      <button style={saveButtonStyle} onClick={handleSave} disabled={saving}>
+        {saving ? "Saving..." : initial ? "Save changes" : "Add purchase"}
       </button>
     </Modal>
   );
