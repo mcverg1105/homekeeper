@@ -1365,6 +1365,27 @@ export default function App({ session }) {
     );
   }
 
+  function openAddContractorModal() {
+    setEditingContractor("new");
+    setShowSettings(false);
+  }
+
+  const contractorModal = editingContractor ? (
+    <AddContractorModal
+      tradeOptions={tradeOptions}
+      initial={editingContractor === "new" ? null : editingContractor}
+      onClose={() => setEditingContractor(null)}
+      onSave={async (data) => {
+        if (editingContractor === "new") {
+          return addContractor(data);
+        }
+        const result = await editContractor(editingContractor.id, data);
+        if (result?.ok !== false) setEditingContractor(null);
+        return result;
+      }}
+    />
+  ) : null;
+
   if (!activeHome) return (
     <div data-theme={theme} style={{ minHeight: "100vh", background: "var(--bg)", fontFamily: "Inter, system-ui, sans-serif" }}>
       <style>{`
@@ -1399,7 +1420,7 @@ export default function App({ session }) {
         contractors={contractors}
         tasks={homes.flatMap((h) => h.tasks || [])}
         projects={homes.flatMap((h) => h.projects || [])}
-        onAddContractor={() => setEditingContractor("new")}
+        onAddContractor={openAddContractorModal}
         onEditContractor={(c) => {
           setEditingContractor(c);
           setShowSettings(false);
@@ -1408,6 +1429,7 @@ export default function App({ session }) {
         onClose={() => setShowSettings(false)}
       />
     )}
+      {contractorModal}
   </div>
 );
 
@@ -1640,6 +1662,7 @@ export default function App({ session }) {
             projects={activeHome.projects}
             onAddProject={() => setEditingProject("new")}
             onEditProject={(p) => setEditingProject(p)}
+            onDeleteProject={deleteProject}
           />
         )}
 
@@ -1717,7 +1740,7 @@ export default function App({ session }) {
           contractors={contractors}
           tasks={homes.flatMap((h) => h.tasks)}
           projects={homes.flatMap((h) => h.projects)}
-          onAddContractor={() => setEditingContractor("new")}
+          onAddContractor={openAddContractorModal}
           onEditContractor={(c) => {
             setEditingContractor(c);
             setShowSettings(false);
@@ -1725,22 +1748,8 @@ export default function App({ session }) {
           onDeleteContractor={deleteContractor}
           onClose={() => setShowSettings(false)}
         />
-      )}     
-      {editingContractor && (
-        <AddContractorModal
-          tradeOptions={tradeOptions}
-          initial={editingContractor === "new" ? null : editingContractor}
-          onClose={() => setEditingContractor(null)}
-          onSave={async (data) => {
-            if (editingContractor === "new") {
-              return addContractor(data);
-            }
-            const result = await editContractor(editingContractor.id, data);
-            if (result?.ok !== false) setEditingContractor(null);
-            return result;
-          }}
-        />
       )}
+      {contractorModal}
       {editingWarranty && (
         <AddWarrantyModal
           homeId={activeHomeId}
@@ -2270,7 +2279,7 @@ function ActivityView({ tasks, projects, contractors }) {
 }
 
 
-function ProjectsView({ projects, onAddProject, onEditProject }) {
+function ProjectsView({ projects, onAddProject, onEditProject, onDeleteProject }) {
   return (
     <div>
       <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
@@ -2288,7 +2297,8 @@ function ProjectsView({ projects, onAddProject, onEditProject }) {
             <ProjectCard
               key={project.id}
               project={project}
-              onOpen={() => onEditProject(project)}
+              onEdit={() => onEditProject(project)}
+              onDelete={() => onDeleteProject(project.id)}
             />
           ))}
         </div>
@@ -2297,27 +2307,20 @@ function ProjectsView({ projects, onAddProject, onEditProject }) {
   );
 }
 
-function ProjectCard({ project, onOpen }) {
+function ProjectCard({ project, onEdit, onDelete }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const totalCost = (project.expenses || []).reduce(
     (sum, expense) => sum + (Number(expense.amount) || 0),
     0
   );
 
   return (
-    <button
-      type="button"
-      onClick={onOpen}
+    <div
       style={{
-        display: "block",
-        width: "100%",
-        textAlign: "left",
         background: "var(--surface)",
         border: "1px solid var(--border)",
         borderRadius: 12,
         padding: "12px 16px",
-        cursor: "pointer",
-        font: "inherit",
-        color: "inherit",
       }}
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
@@ -2333,12 +2336,48 @@ function ProjectCard({ project, onOpen }) {
         >
           {project.title}
         </h3>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", flexShrink: 0, gap: 2 }}>
-          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{formatDate(project.date)}</span>
-          <span style={{ fontSize: 14, fontWeight: 500 }}>{formatCurrency(totalCost)}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+            <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{formatDate(project.date)}</span>
+            <span style={{ fontSize: 14, fontWeight: 500 }}>{formatCurrency(totalCost)}</span>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {confirmDelete ? (
+              <>
+                <button
+                  onClick={onDelete}
+                  title="Confirm delete"
+                  style={{
+                    ...iconButtonStyle,
+                    width: "auto",
+                    padding: "0 10px",
+                    border: "1px solid #A32D2D",
+                    background: "#A32D2D",
+                    color: "#FFFFFF",
+                    fontSize: 12,
+                    fontWeight: 500,
+                  }}
+                >
+                  Delete
+                </button>
+                <button onClick={() => setConfirmDelete(false)} title="Cancel" style={iconButtonStyle}>
+                  <X size={12} />
+                </button>
+              </>
+            ) : (
+              <>
+                <button onClick={onEdit} title="Edit" style={iconButtonStyle}>
+                  <Settings size={12} />
+                </button>
+                <button onClick={() => setConfirmDelete(true)} title="Delete" style={iconButtonStyle}>
+                  <X size={12} />
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </div>
-    </button>
+    </div>
   );
 }
 
