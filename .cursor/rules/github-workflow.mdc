@@ -1,0 +1,30 @@
+---
+description: After code changes, run CI locally and push a feature branch for PR
+alwaysApply: true
+---
+
+# GitHub deploy workflow
+
+When you finish implementing requested code changes in this repo:
+
+1. Run `npm run lint` and `npm run build` locally. Fix failures before continuing.
+2. Create a feature branch from latest `main` if not already on one (`feature/short-description` or `fix/short-description`).
+3. Commit with a clear message focused on **why**.
+4. Push the branch to `origin` — never push directly to `main`.
+5. Give the user the PR link: `https://github.com/mcverg1105/homekeeper/pull/new/<branch-name>`
+6. Remind them to merge after **lint** and **build** checks pass. Do not merge for them.
+
+## Skip this workflow when
+
+- The user says not to commit or push
+- The task was question-only or review-only with no code changes
+- Lint or build cannot be fixed in the session — report the blocker instead
+
+## Security
+
+- Never commit `.env` or secrets
+- Never force-push `main`
+
+## Shorthand
+
+If the user says **"commit and PR"**, run this full workflow.
