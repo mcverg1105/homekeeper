@@ -1365,6 +1365,27 @@ export default function App({ session }) {
     );
   }
 
+  function openAddContractorModal() {
+    setEditingContractor("new");
+    setShowSettings(false);
+  }
+
+  const contractorModal = editingContractor ? (
+    <AddContractorModal
+      tradeOptions={tradeOptions}
+      initial={editingContractor === "new" ? null : editingContractor}
+      onClose={() => setEditingContractor(null)}
+      onSave={async (data) => {
+        if (editingContractor === "new") {
+          return addContractor(data);
+        }
+        const result = await editContractor(editingContractor.id, data);
+        if (result?.ok !== false) setEditingContractor(null);
+        return result;
+      }}
+    />
+  ) : null;
+
   if (!activeHome) return (
     <div data-theme={theme} style={{ minHeight: "100vh", background: "var(--bg)", fontFamily: "Inter, system-ui, sans-serif" }}>
       <style>{`
@@ -1399,7 +1420,7 @@ export default function App({ session }) {
         contractors={contractors}
         tasks={homes.flatMap((h) => h.tasks || [])}
         projects={homes.flatMap((h) => h.projects || [])}
-        onAddContractor={() => setEditingContractor("new")}
+        onAddContractor={openAddContractorModal}
         onEditContractor={(c) => {
           setEditingContractor(c);
           setShowSettings(false);
@@ -1408,6 +1429,7 @@ export default function App({ session }) {
         onClose={() => setShowSettings(false)}
       />
     )}
+      {contractorModal}
   </div>
 );
 
@@ -1530,29 +1552,62 @@ export default function App({ session }) {
         </div>
       </header>
 
-      {/* Home switcher */}
-      <div
-        style={{
-          background: "var(--surface)",
-          borderBottom: "1px solid var(--border)",
-          padding: "12px 24px",
-        }}
-      >
+      <main style={{ maxWidth: 920, margin: "0 auto", padding: "28px 24px 80px" }}>
+        {/* Property header with inline switcher */}
         <div
           style={{
-            maxWidth: 920,
-            margin: "0 auto",
+            marginBottom: 24,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 14,
+            flexWrap: "wrap",
           }}
         >
+          <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0, flex: "1 1 200px" }}>
+            {activeHome.image && (
+              <StorageImage
+                image={activeHome.image}
+                alt={activeHome.image.name}
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: 10,
+                  objectFit: "cover",
+                  border: "1px solid var(--border)",
+                  flexShrink: 0,
+                }}
+              />
+            )}
+            <div style={{ minWidth: 0 }}>
+              <h1
+                style={{
+                  fontFamily: "'Source Serif 4', serif",
+                  fontSize: 28,
+                  fontWeight: 600,
+                  margin: "0 0 4px",
+                }}
+              >
+                {activeHome.name}
+              </h1>
+              {activeHome.address && (
+                <p style={{ margin: 0, fontSize: 14, color: "var(--text-muted)" }}>
+                  {activeHome.address}
+                </p>
+              )}
+            </div>
+          </div>
           <select
             value={activeHomeId}
             onChange={(e) => setActiveHomeId(e.target.value)}
+            aria-label="Switch property"
             style={{
               ...inputStyle,
               marginBottom: 0,
               width: "auto",
-              minWidth: 220,
+              minWidth: 140,
               maxWidth: "100%",
+              flexShrink: 0,
               fontWeight: 500,
               borderColor: homes.find((h) => h.id === activeHomeId)?.color,
             }}
@@ -1561,41 +1616,6 @@ export default function App({ session }) {
               <option key={home.id} value={home.id}>{home.name}</option>
             ))}
           </select>
-        </div>
-      </div>
-
-      <main style={{ maxWidth: 920, margin: "0 auto", padding: "28px 24px 80px" }}>
-        {/* Home info strip */}
-        <div style={{ marginBottom: 24, display: "flex", alignItems: "center", gap: 14 }}>
-          {activeHome.image && (
-            <StorageImage
-              image={activeHome.image}
-              alt={activeHome.image.name}
-              style={{
-                width: 56,
-                height: 56,
-                borderRadius: 10,
-                objectFit: "cover",
-                border: "1px solid var(--border)",
-                flexShrink: 0,
-              }}
-            />
-          )}
-          <div>
-            <h1
-              style={{
-                fontFamily: "'Source Serif 4', serif",
-                fontSize: 28,
-                fontWeight: 600,
-                margin: "0 0 4px",
-              }}
-            >
-              {activeHome.name}
-            </h1>
-            <p style={{ margin: 0, fontSize: 14, color: "var(--text-muted)" }}>
-              {activeHome.address}
-            </p>
-          </div>
         </div>
 
         {/* View tabs */}
@@ -1640,10 +1660,8 @@ export default function App({ session }) {
         {view === "projects" && (
           <ProjectsView
             projects={activeHome.projects}
-            contractors={contractors}
             onAddProject={() => setEditingProject("new")}
             onEditProject={(p) => setEditingProject(p)}
-            onDeleteProject={deleteProject}
           />
         )}
 
@@ -1694,6 +1712,14 @@ export default function App({ session }) {
             if (result?.ok !== false) setEditingProject(null);
             return result;
           }}
+          onDelete={
+            editingProject === "new"
+              ? undefined
+              : async () => {
+                  await deleteProject(editingProject.id);
+                  setEditingProject(null);
+                }
+          }
         />
       )}
  
@@ -1713,7 +1739,7 @@ export default function App({ session }) {
           contractors={contractors}
           tasks={homes.flatMap((h) => h.tasks)}
           projects={homes.flatMap((h) => h.projects)}
-          onAddContractor={() => setEditingContractor("new")}
+          onAddContractor={openAddContractorModal}
           onEditContractor={(c) => {
             setEditingContractor(c);
             setShowSettings(false);
@@ -1721,22 +1747,8 @@ export default function App({ session }) {
           onDeleteContractor={deleteContractor}
           onClose={() => setShowSettings(false)}
         />
-      )}     
-      {editingContractor && (
-        <AddContractorModal
-          tradeOptions={tradeOptions}
-          initial={editingContractor === "new" ? null : editingContractor}
-          onClose={() => setEditingContractor(null)}
-          onSave={async (data) => {
-            if (editingContractor === "new") {
-              return addContractor(data);
-            }
-            const result = await editContractor(editingContractor.id, data);
-            if (result?.ok !== false) setEditingContractor(null);
-            return result;
-          }}
-        />
       )}
+      {contractorModal}
       {editingWarranty && (
         <AddWarrantyModal
           homeId={activeHomeId}
@@ -2266,7 +2278,7 @@ function ActivityView({ tasks, projects, contractors }) {
 }
 
 
-function ProjectsView({ projects, contractors, onAddProject, onEditProject, onDeleteProject }) {
+function ProjectsView({ projects, onAddProject, onEditProject }) {
   return (
     <div>
       <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
@@ -2279,14 +2291,12 @@ function ProjectsView({ projects, contractors, onAddProject, onEditProject, onDe
           body="Record home improvement projects, including any paint colors used, so you can find them again later."
         />
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {projects.map((project) => (
             <ProjectCard
               key={project.id}
               project={project}
-              contractors={contractors.filter((c) => (project.contractorIds || []).includes(c.id))}
-              onEdit={() => onEditProject(project)}
-              onDelete={() => onDeleteProject(project.id)}
+              onOpen={() => onEditProject(project)}
             />
           ))}
         </div>
@@ -2295,176 +2305,48 @@ function ProjectsView({ projects, contractors, onAddProject, onEditProject, onDe
   );
 }
 
-function ProjectCard({ project, contractors, onEdit, onDelete }) {
-  const [confirmDelete, setConfirmDelete] = useState(false);
+function ProjectCard({ project, onOpen }) {
+  const totalCost = (project.expenses || []).reduce(
+    (sum, expense) => sum + (Number(expense.amount) || 0),
+    0
+  );
 
   return (
-    <div
+    <button
+      type="button"
+      onClick={onOpen}
       style={{
+        display: "block",
+        width: "100%",
+        textAlign: "left",
         background: "var(--surface)",
         border: "1px solid var(--border)",
         borderRadius: 12,
-        padding: "16px 18px",
+        padding: "12px 16px",
+        cursor: "pointer",
+        font: "inherit",
+        color: "inherit",
       }}
     >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
         <h3
           style={{
             fontFamily: "'Source Serif 4', serif",
-            fontSize: 17,
+            fontSize: 16,
             fontWeight: 600,
             margin: 0,
+            minWidth: 0,
+            flex: 1,
           }}
         >
           {project.title}
         </h3>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", flexShrink: 0, gap: 2 }}>
           <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{formatDate(project.date)}</span>
-          <div style={{ display: "flex", gap: 6 }}>
-            {confirmDelete ? (
-              <>
-                <button
-                  onClick={onDelete}
-                  title="Confirm delete"
-                  style={{
-                    ...iconButtonStyle,
-                    width: "auto",
-                    padding: "0 10px",
-                    border: "1px solid #A32D2D",
-                    background: "#A32D2D",
-                    color: "#FFFFFF",
-                    fontSize: 12,
-                    fontWeight: 500,
-                  }}
-                >
-                  Delete
-                </button>
-                <button onClick={() => setConfirmDelete(false)} title="Cancel" style={iconButtonStyle}>
-                  <X size={12} />
-                </button>
-              </>
-            ) : (
-              <>
-                <button onClick={onEdit} title="Edit" style={iconButtonStyle}>
-                  <Settings size={12} />
-                </button>
-                <button onClick={() => setConfirmDelete(true)} title="Delete" style={iconButtonStyle}>
-                  <X size={12} />
-                </button>
-              </>
-            )}
-          </div>
+          <span style={{ fontSize: 14, fontWeight: 500 }}>{formatCurrency(totalCost)}</span>
         </div>
       </div>
-      {contractors.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
-          {contractors.map((c) => (
-            <div
-              key={c.id}
-              style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-muted)", border: "1px solid var(--subtle)", borderRadius: 6, padding: "3px 8px" }}
-            >
-              <User size={12} />
-              {contractorLabel(c)}{c.company && c.name ? ` · ${c.name}` : ""}
-            </div>
-          ))}
-        </div>
-      )}
-      {project.notes && (
-        <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 12px", lineHeight: 1.6 }}>
-          {project.notes}
-        </p>
-      )}
-      {project.paints.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: project.notes ? 0 : 4 }}>
-          {project.paints.map((paint, i) => (
-            <div
-              key={i}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                border: "1px solid var(--subtle)",
-                borderRadius: 8,
-                padding: "6px 10px 6px 6px",
-              }}
-            >
-              <span
-                style={{
-                  width: 24,
-                  height: 24,
-                  borderRadius: 6,
-                  background: paint.hex,
-                  border: "1px solid rgba(0,0,0,0.08)",
-                  flexShrink: 0,
-                }}
-              />
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 500 }}>{paint.name}</div>
-                <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  {paint.location} · {paint.hex}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-      {project.images && project.images.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
-          {project.images.map((img) => (
-            <StorageImage
-              key={img.id}
-              image={img}
-              alt={img.name}
-              style={{
-                width: 64,
-                height: 64,
-                borderRadius: 8,
-                objectFit: "cover",
-                border: "1px solid var(--subtle)",
-                flexShrink: 0,
-              }}
-            />
-          ))}
-        </div>
-      )}
-      <DocumentListDisplay documents={project.documents} />
-      {project.expenses && project.expenses.length > 0 && (
-        <div
-          style={{
-            marginTop: 12,
-            paddingTop: 10,
-            borderTop: "1px solid var(--subtle)",
-          }}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-            <div style={{ fontSize: 11, fontWeight: 500, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.03em" }}>
-              Expenses
-            </div>
-            <div style={{ fontSize: 13, fontWeight: 500 }}>
-              {formatCurrency(project.expenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0))}
-            </div>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            {project.expenses.map((expense) => (
-              <div key={expense.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text-secondary)" }}>
-                {expense.receipt && (
-                  <StorageImage
-                    image={expense.receipt}
-                    alt={expense.receipt.name}
-                    style={{ width: 24, height: 24, borderRadius: 4, objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }}
-                  />
-                )}
-                <span style={{ flex: 1, minWidth: 0 }}>
-                  {expense.description || expense.category}
-                  <span style={{ color: "var(--text-muted)" }}> · {expense.category}</span>
-                </span>
-                <span style={{ flexShrink: 0 }}>{formatCurrency(expense.amount)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
+    </button>
   );
 }
 
@@ -3772,7 +3654,7 @@ function CompleteTaskModal({ task, contractors, onClose, onSave }) {
 }
 
 
-function AddProjectModal({ homeId, homes, sourceHomeId, contractors, initial, onClose, onSave }) {
+function AddProjectModal({ homeId, homes, sourceHomeId, contractors, initial, onClose, onSave, onDelete }) {
   const isNew = !initial;
   const draftKey = isNew && homeId ? `project:${homeId}` : null;
   const savedDraft = isNew ? readFormDraft(draftKey) : null;
@@ -3788,6 +3670,8 @@ function AddProjectModal({ homeId, homes, sourceHomeId, contractors, initial, on
   const [expenses, setExpenses] = useState(() => savedDraft?.expenses ?? initial?.expenses ?? []);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [draftRestored] = useState(() => {
     if (!savedDraft) return false;
     return !!(savedDraft.title || savedDraft.notes || savedDraft.paints?.length || savedDraft.contractorIds?.length);
@@ -3850,6 +3734,13 @@ function AddProjectModal({ homeId, homes, sourceHomeId, contractors, initial, on
     } else {
       clearFormDraft(draftKey);
     }
+  }
+
+  async function handleDelete() {
+    if (!onDelete) return;
+    setDeleting(true);
+    await onDelete();
+    setDeleting(false);
   }
 
   return (
@@ -3975,9 +3866,72 @@ function AddProjectModal({ homeId, homes, sourceHomeId, contractors, initial, on
         </p>
       )}
 
-      <button style={saveButtonStyle} onClick={handleSave} disabled={saving}>
+      <button style={saveButtonStyle} onClick={handleSave} disabled={saving || deleting}>
         {saving ? "Saving..." : initial ? "Save changes" : "Save project"}
       </button>
+
+      {!isNew && onDelete && (
+        <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+          {confirmDelete ? (
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                type="button"
+                onClick={handleDelete}
+                disabled={deleting || saving}
+                style={{
+                  flex: 1,
+                  padding: "10px 16px",
+                  borderRadius: 8,
+                  border: "1px solid #A32D2D",
+                  background: "#A32D2D",
+                  color: "#FFFFFF",
+                  fontSize: 14,
+                  fontWeight: 500,
+                  cursor: deleting || saving ? "not-allowed" : "pointer",
+                  opacity: deleting || saving ? 0.7 : 1,
+                }}
+              >
+                {deleting ? "Deleting..." : "Confirm delete"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(false)}
+                disabled={deleting || saving}
+                style={{
+                  padding: "10px 16px",
+                  borderRadius: 8,
+                  border: "1px solid var(--border)",
+                  background: "var(--surface)",
+                  color: "var(--text-secondary)",
+                  fontSize: 14,
+                  cursor: deleting || saving ? "not-allowed" : "pointer",
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirmDelete(true)}
+              disabled={saving || deleting}
+              style={{
+                width: "100%",
+                padding: "10px 16px",
+                borderRadius: 8,
+                border: "1px solid var(--border)",
+                background: "var(--surface)",
+                color: "#A32D2D",
+                fontSize: 14,
+                fontWeight: 500,
+                cursor: saving || deleting ? "not-allowed" : "pointer",
+              }}
+            >
+              Delete project
+            </button>
+          )}
+        </div>
+      )}
     </Modal>
   );
 }
